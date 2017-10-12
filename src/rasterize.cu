@@ -18,6 +18,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+static const int DEPTHSCALE = 10000;
 #define SCANLINE 1 // the other technique is using the edge Function
 
 namespace 
@@ -45,12 +46,12 @@ namespace
 		// The attributes listed below might be useful, 
 		// but always feel free to modify on your own
 
-		 glm::vec3 eyePos;	// eye space position used for shading
-		 glm::vec3 eyeNor;	// eye space normal used for shading, cuz normal will go wrong after perspective transformation
-		// glm::vec3 col;
-		 glm::vec2 texcoord0;
-		 TextureData* dev_diffuseTex = NULL;
-		// int texWidth, texHeight;
+		glm::vec3 eyePos;	// eye space position used for shading
+		glm::vec3 fNor;	// eye space normal used for shading, cuz normal will go wrong after perspective transformation
+		glm::vec3 col;
+		glm::vec2 texcoord0;
+		TextureData* dev_diffuseTex = NULL;
+		int texWidth, texHeight;
 		// ...
 	};
 
@@ -62,14 +63,14 @@ namespace
 
 	struct Fragment 
 	{
-		glm::vec3 color;
+		glm::vec3 fcolor;
 
 		// TODO: add new attributes to your Fragment
 		// The attributes listed below might be useful, 
 		// but always feel free to modify on your own
 
-		// glm::vec3 eyePos;	// eye space position used for shading
-		// glm::vec3 eyeNor;
+		glm::vec3 eyePos;	// eye space position used for shading
+		glm::vec3 fNor;
 		// VertexAttributeTexcoord texcoord0;
 		// TextureData* dev_diffuseTex;
 		// ...
@@ -112,7 +113,6 @@ static int height = 0;
 static int totalNumPrimitives = 0;
 static Primitive *dev_primitives = NULL;
 static Fragment *dev_fragmentBuffer = NULL;
-static float *dev_depthBuffer = NULL;
 static glm::vec3 *dev_framebuffer = NULL;
 
 static int * dev_depth = NULL;	// you might need this buffer when doing depth test
@@ -129,16 +129,29 @@ void sendImageToPBO(uchar4 *pbo, int w, int h, glm::vec3 *image)
 
     if (x < w && y < h) 
 	{
-        glm::vec3 color;
-        color.x = glm::clamp(image[index].x, 0.0f, 1.0f) * 255.0;
-        color.y = glm::clamp(image[index].y, 0.0f, 1.0f) * 255.0;
-        color.z = glm::clamp(image[index].z, 0.0f, 1.0f) * 255.0;
+        glm::vec3 fcolor;
+        fcolor.x = glm::clamp(image[index].x, 0.0f, 1.0f) * 255.0;
+        fcolor.y = glm::clamp(image[index].y, 0.0f, 1.0f) * 255.0;
+        fcolor.z = glm::clamp(image[index].z, 0.0f, 1.0f) * 255.0;
         // Each thread writes one pixel location in the texture (textel)
         pbo[index].w = 0;
-        pbo[index].x = color.x;
-        pbo[index].y = color.y;
-        pbo[index].z = color.z;
+        pbo[index].x = fcolor.x;
+        pbo[index].y = fcolor.y;
+        pbo[index].z = fcolor.z;
     }
+}
+
+__host__ __device__ glm::vec3 LambertFragShader(glm::vec3 pos, glm::vec3 color, glm::vec3 normal)
+{
+	glm::vec3 finalColor;
+	glm::vec3 lightPosition = glm::vec3(10,20,10);
+	glm::vec3 lightVec = glm::normalize(pos - lightPosition);
+	
+	glm::vec3 ambientLightColor = glm::vec3(0.2f, 0.2f, 0.2f);
+	float absDot = glm::abs(glm::dot(lightVec, normal));
+
+	finalColor = color*absDot + ambientLightColor;
+	return glm::clamp(finalColor, 0.0f, 1.0f);
 }
 
 /** 
@@ -153,10 +166,12 @@ void render(int w, int h, Fragment *fragmentBuffer, glm::vec3 *framebuffer)
 
     if (x < w && y < h) 
 	{
-        framebuffer[index] = fragmentBuffer[index].color;
+        //framebuffer[index] = fragmentBuffer[index].fcolor;
 
 		// TODO: add your fragment shader code here
-
+		framebuffer[index] = LambertFragShader(fragmentBuffer[index].eyePos, 
+											   fragmentBuffer[index].fcolor, 
+											   fragmentBuffer[index].fNor);
     }
 }
 
@@ -174,16 +189,13 @@ void rasterizeInit(int w, int h)
     cudaMalloc(&dev_framebuffer,   width * height * sizeof(glm::vec3));
     cudaMemset(dev_framebuffer, 0, width * height * sizeof(glm::vec3));
     
-	cudaFree(dev_depthBuffer);
-	cudaMalloc(&dev_depthBuffer, width * height * sizeof(float));
-	cudaMemset(dev_depthBuffer, 0, width * height * sizeof(float));
 	cudaFree(dev_depth);
 	cudaMalloc(&dev_depth, width * height * sizeof(int));
 
 	checkCUDAError("rasterizeInit");
 }
 
-__global__ void initDepth(int w, int h, int * depth, float * dev_depthBuffer)
+__global__ void initDepth(int w, int h, int * depth)
 {
 	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
 	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
@@ -192,10 +204,8 @@ __global__ void initDepth(int w, int h, int * depth, float * dev_depthBuffer)
 	{
 		int index = x + (y * w);
 		depth[index] = INT_MAX;
-		//dev_depthBuffer[index] = FLT_MAX;
 	}
 }
-
 
 /**
 * kern function with support for stride to sometimes replace cudaMemcpy
@@ -665,8 +675,10 @@ __global__ void _vertexTransformAndAssembly( int numVertices,
 		//---------------------------------------------------
 		// Assemble all attribute arrays into the primitive array
 		primitive.dev_verticesOut[vid].pos = vPos;
-		primitive.dev_verticesOut[vid].eyeNor = vNor;
+		primitive.dev_verticesOut[vid].fNor = vNor;
 		primitive.dev_verticesOut[vid].eyePos = glm::vec3(eyePos);
+
+		primitive.dev_verticesOut[vid].col = glm::vec3(0,1,0);
 		//vo.dev_diffuseTex = ;
 		//vo.texcoord0 = ;
 	}
@@ -696,7 +708,7 @@ __global__ void _primitiveAssembly(int numIndices, int curPrimitiveBeginId,
 }
 
 __global__ void _rasterize(int w, int h, int numTriangles, Primitive* dev_primitives, 
-							Fragment* dev_fragments, float* dev_depthBuffer)
+							Fragment* dev_fragments, int* dev_depthBuffer)
 {
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
 
@@ -720,13 +732,25 @@ __global__ void _rasterize(int w, int h, int numTriangles, Primitive* dev_primit
 				{
 					int fragIndex = x + y*w;
 
-					float z = getZAtCoordinate(baryCoords, tri);
-					if (z < dev_depthBuffer[fragIndex])
-					{
-						dev_depthBuffer[fragIndex] = z;
-						//dev_fragments[fragIndex].color = glm::vec3(1.0f-z, 1.0f-z, 1.0f-z);
-						dev_fragments[fragIndex].color = glm::vec3(-z, -z, -z);
-					}
+					//multiplying z value by a large static int because atomicMin is only defined for ints
+					//and atomicMin is needed to handle race conditions
+					int scaledZ = getZAtCoordinate(baryCoords, tri) * DEPTHSCALE;
+					atomicMin(&dev_depthBuffer[fragIndex], scaledZ);
+					
+					dev_fragments[fragIndex].eyePos = baryCoords.x*dev_primitives[index].v[0].eyePos +
+													  baryCoords.y*dev_primitives[index].v[1].eyePos +
+													  baryCoords.z*dev_primitives[index].v[2].eyePos;
+					dev_fragments[fragIndex].fcolor = baryCoords.x*dev_primitives[index].v[0].col +
+												 	  baryCoords.y*dev_primitives[index].v[1].col +
+												 	  baryCoords.z*dev_primitives[index].v[2].col;
+					dev_fragments[fragIndex].fNor = baryCoords.x*dev_primitives[index].v[0].fNor +
+													baryCoords.y*dev_primitives[index].v[1].fNor +
+													baryCoords.z*dev_primitives[index].v[2].fNor;
+
+					//if testing Depth coloration
+					//dev_fragments[fragIndex].fcolor = glm::vec3(-dev_depthBuffer[fragIndex]/float(DEPTHSCALE),
+					//										      -dev_depthBuffer[fragIndex]/float(DEPTHSCALE),
+					//										      -dev_depthBuffer[fragIndex]/float(DEPTHSCALE));
 				}
 #else
 				////edgefunction implementation
@@ -788,14 +812,14 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
 	}
 	
 	cudaMemset(dev_fragmentBuffer, 0, width * height * sizeof(Fragment));
-	initDepth <<<blockCount2d, blockSize2d >>>(width, height, dev_depth, dev_depthBuffer);
+	initDepth <<<blockCount2d, blockSize2d >>>(width, height, dev_depth);
 	
 	// rasterize --> looping over all primitives(triangles)
 	dim3 numThreadsPerBlock(128);
 	dim3 blockSize1d((totalNumPrimitives - 1) / numThreadsPerBlock.x + 1);
 	_rasterize <<<blockSize1d, numThreadsPerBlock>>>(width, height, totalNumPrimitives, 
 													dev_primitives, dev_fragmentBuffer,
-													dev_depthBuffer);
+													dev_depth);
 
     // Copy depthbuffer colors into framebuffer
 	render <<<blockCount2d, blockSize2d >>>(width, height, dev_fragmentBuffer, dev_framebuffer);

@@ -6,8 +6,6 @@
  * @copyright University of Pennsylvania
  */
 
-
-
 #include "main.hpp"
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -18,8 +16,10 @@
 //-------------MAIN--------------
 //-------------------------------
 
-int main(int argc, char **argv) {
-    if (argc != 2) {
+int main(int argc, char **argv) 
+{
+    if (argc != 2) 
+	{
         cout << "Usage: [gltf file]. Press Enter to exit" << endl;
 		getchar();
         return 0;
@@ -32,19 +32,24 @@ int main(int argc, char **argv) {
 	std::string ext = getFilePathExtension(input_filename);
 
 	bool ret = false;
-	if (ext.compare("glb") == 0) {
+	if (ext.compare("glb") == 0) 
+	{
 		// assume binary glTF.
 		ret = loader.LoadBinaryFromFile(&scene, &err, input_filename.c_str());
-	} else {
+	} 
+	else 
+	{
 		// assume ascii glTF.
 		ret = loader.LoadASCIIFromFile(&scene, &err, input_filename.c_str());
 	}
 
-	if (!err.empty()) {
+	if (!err.empty()) 
+	{
 		printf("Err: %s\n", err.c_str());
 	}
 
-	if (!ret) {
+	if (!ret) 
+	{
 		printf("Failed to parse glTF\n");
 		return -1;
 	}
@@ -55,7 +60,8 @@ int main(int argc, char **argv) {
     fpstracker = 0;
 
     // Launch CUDA/GL
-    if (init(scene)) {
+    if (init(scene)) 
+	{
         // GLFW main loop
         mainLoop();
     }
@@ -63,15 +69,17 @@ int main(int argc, char **argv) {
     return 0;
 }
 
-void mainLoop() {
-    while (!glfwWindowShouldClose(window)) {
+void mainLoop() 
+{
+    while (!glfwWindowShouldClose(window)) 
+	{
         glfwPollEvents();
         runCuda();
 
         time_t seconds2 = time (NULL);
 
-        if (seconds2 - seconds >= 1) {
-
+        if (seconds2 - seconds >= 1) 
+		{
             fps = fpstracker / (seconds2 - seconds);
             fpstracker = 0;
             seconds = seconds2;
@@ -131,17 +139,20 @@ void runCuda()
 //----------SETUP STUFF----------
 //-------------------------------
 
-bool init(const tinygltf::Scene & scene) {
+bool init(const tinygltf::Scene & scene) 
+{
     glfwSetErrorCallback(errorCallback);
 
-    if (!glfwInit()) {
+    if (!glfwInit()) 
+	{
         return false;
     }
 
     width = 800;
     height = 800;
     window = glfwCreateWindow(width, height, "CIS 565 Pathtracer", NULL, NULL);
-    if (!window) {
+    if (!window) 
+	{
         glfwTerminate();
         return false;
     }
@@ -150,7 +161,8 @@ bool init(const tinygltf::Scene & scene) {
 
     // Set up GL context
     glewExperimental = GL_TRUE;
-    if (glewInit() != GLEW_OK) {
+    if (glewInit() != GLEW_OK) 
+	{
         return false;
     }
 
@@ -171,15 +183,15 @@ bool init(const tinygltf::Scene & scene) {
 		std::map<std::string, std::vector<std::string> >::const_iterator itEnd(
 			scene.scenes.end());
 
-		for (; it != itEnd; it++) {
-			for (size_t i = 0; i < it->second.size(); i++) {
-				std::cout << it->second[i]
-					<< ((i != (it->second.size() - 1)) ? ", " : "");
+		for (; it != itEnd; it++) 
+		{
+			for (size_t i = 0; i < it->second.size(); i++) 
+			{
+				std::cout << it->second[i] << ((i != (it->second.size() - 1)) ? ", " : "");
 			}
 			std::cout << " ] " << std::endl;
 		}
 	}
-
 
 	rasterizeSetBuffers(scene);
 
@@ -192,7 +204,8 @@ bool init(const tinygltf::Scene & scene) {
     return true;
 }
 
-void initPBO() {
+void initPBO() 
+{
     // set up vertex data parameter
     int num_texels = width * height;
     int num_values = num_texels * 4;
@@ -207,20 +220,20 @@ void initPBO() {
     // Allocate data for the buffer. 4-channel 8-bit image
     glBufferData(GL_PIXEL_UNPACK_BUFFER, size_tex_data, NULL, GL_DYNAMIC_COPY);
     cudaGLRegisterBufferObject(pbo);
-
 }
 
-void initCuda() {
+void initCuda() 
+{
     // Use device with highest Gflops/s
     cudaGLSetGLDevice(0);
-
     rasterizeInit(width, height);
 
     // Clean up on program exit
     atexit(cleanupCuda);
 }
 
-void initTextures() {
+void initTextures() 
+{
     glGenTextures(1, &displayImage);
     glBindTexture(GL_TEXTURE_2D, displayImage);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -229,7 +242,8 @@ void initTextures() {
                   GL_UNSIGNED_BYTE, NULL);
 }
 
-void initVAO(void) {
+void initVAO(void) 
+{
     GLfloat vertices[] = {
         -1.0f, -1.0f,
         1.0f, -1.0f,
@@ -264,13 +278,15 @@ void initVAO(void) {
 }
 
 
-GLuint initShader() {
+GLuint initShader() 
+{
     const char *attribLocations[] = { "Position", "Tex" };
     GLuint program = glslUtility::createDefaultProgram(attribLocations, 2);
     GLint location;
 
     glUseProgram(program);
-    if ((location = glGetUniformLocation(program, "u_image")) != -1) {
+    if ((location = glGetUniformLocation(program, "u_image")) != -1) 
+	{
         glUniform1i(location, 0);
     }
 
@@ -280,18 +296,22 @@ GLuint initShader() {
 //-------------------------------
 //---------CLEANUP STUFF---------
 //-------------------------------
-
-void cleanupCuda() {
-    if (pbo) {
+void cleanupCuda() 
+{
+    if (pbo) 
+	{
         deletePBO(&pbo);
     }
-    if (displayImage) {
+    if (displayImage) 
+	{
         deleteTexture(&displayImage);
     }
 }
 
-void deletePBO(GLuint *pbo) {
-    if (pbo) {
+void deletePBO(GLuint *pbo) 
+{
+    if (pbo) 
+	{
         // unregister this buffer object with CUDA
         cudaGLUnregisterBufferObject(*pbo);
 
@@ -302,12 +322,14 @@ void deletePBO(GLuint *pbo) {
     }
 }
 
-void deleteTexture(GLuint *tex) {
+void deleteTexture(GLuint *tex) 
+{
     glDeleteTextures(1, tex);
     *tex = (GLuint)NULL;
 }
 
-void shut_down(int return_code) {
+void shut_down(int return_code) 
+{
     rasterizeFree();
     cudaDeviceReset();
 #ifdef __APPLE__
@@ -319,13 +341,15 @@ void shut_down(int return_code) {
 //------------------------------
 //-------GLFW CALLBACKS---------
 //------------------------------
-
-void errorCallback(int error, const char *description) {
+void errorCallback(int error, const char *description) 
+{
     fputs(description, stderr);
 }
 
-void keyCallback(GLFWwindow *window, int key, int scancode, int action, int mods) {
-    if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
+void keyCallback(GLFWwindow *window, int key, int scancode, int action, int mods) 
+{
+    if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) 
+	{
         glfwSetWindowShouldClose(window, GL_TRUE);
     }
 }
@@ -333,7 +357,8 @@ void keyCallback(GLFWwindow *window, int key, int scancode, int action, int mods
 //----------------------------
 //----- util -----------------
 //----------------------------
-static std::string getFilePathExtension(const std::string &FileName) {
+static std::string getFilePathExtension(const std::string &FileName) 
+{
 	if (FileName.find_last_of(".") != std::string::npos)
 		return FileName.substr(FileName.find_last_of(".") + 1);
 	return "";
