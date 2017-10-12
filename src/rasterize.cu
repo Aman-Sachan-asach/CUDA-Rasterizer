@@ -20,6 +20,9 @@
 
 static const int DEPTHSCALE = 10000;
 #define SCANLINE 1 // the other technique is using the edge Function
+#define DISPLAY_DEPTH 0
+#define DISPLAY_NORMAL 0
+#define FRAG_SHADING_LAMBERT 1
 
 namespace 
 {
@@ -47,7 +50,7 @@ namespace
 		// but always feel free to modify on your own
 
 		glm::vec3 eyePos;	// eye space position used for shading
-		glm::vec3 fNor;	// eye space normal used for shading, cuz normal will go wrong after perspective transformation
+		glm::vec3 vNor;	// eye space normal used for shading, cuz normal will go wrong after perspective transformation
 		glm::vec3 col;
 		glm::vec2 texcoord0;
 		TextureData* dev_diffuseTex = NULL;
@@ -166,12 +169,15 @@ void render(int w, int h, Fragment *fragmentBuffer, glm::vec3 *framebuffer)
 
     if (x < w && y < h) 
 	{
-        //framebuffer[index] = fragmentBuffer[index].fcolor;
-
-		// TODO: add your fragment shader code here
-		framebuffer[index] = LambertFragShader(fragmentBuffer[index].eyePos, 
-											   fragmentBuffer[index].fcolor, 
+#if DISPLAY_DEPTH || DISPLAY_NORMAL
+		framebuffer[index] = glm::abs(fragmentBuffer[index].fcolor) + 0.15f;
+#elif FRAG_SHADING_LAMBERT
+		framebuffer[index] = LambertFragShader(fragmentBuffer[index].eyePos,
+											   fragmentBuffer[index].fcolor,
 											   fragmentBuffer[index].fNor);
+#else
+		framebuffer[index] = glm::abs(fragmentBuffer[index].fcolor) + 0.15f;
+#endif
     }
 }
 
@@ -668,6 +674,8 @@ __global__ void _vertexTransformAndAssembly( int numVertices,
 		vPos.x = (vPos.x + 1.0f)*float(width)*0.5f;
 		vPos.y = (1.0f - vPos.y)*float(height)*0.5f; //now in pixel space or window coordinates
 		
+		vPos.z = -(vPos.z + 1.0f)*0.5f; // to convert z from a 1 to -1 range to a 0 to 1 range
+
 		glm::vec3 vNor = primitive.dev_normal[vid];
 		vNor = glm::normalize(MV_normal*vNor);
 		//---------------------------------------------------
@@ -675,7 +683,7 @@ __global__ void _vertexTransformAndAssembly( int numVertices,
 		//---------------------------------------------------
 		// Assemble all attribute arrays into the primitive array
 		primitive.dev_verticesOut[vid].pos = vPos;
-		primitive.dev_verticesOut[vid].fNor = vNor;
+		primitive.dev_verticesOut[vid].vNor = vNor;
 		primitive.dev_verticesOut[vid].eyePos = glm::vec3(eyePos);
 
 		primitive.dev_verticesOut[vid].col = glm::vec3(0,1,0);
@@ -734,23 +742,36 @@ __global__ void _rasterize(int w, int h, int numTriangles, Primitive* dev_primit
 
 					//multiplying z value by a large static int because atomicMin is only defined for ints
 					//and atomicMin is needed to handle race conditions
-					int scaledZ = getZAtCoordinate(baryCoords, tri) * DEPTHSCALE;
+					int scaledZ = getZAtCoordinate(baryCoords, tri)*DEPTHSCALE;
 					atomicMin(&dev_depthBuffer[fragIndex], scaledZ);
-					
-					dev_fragments[fragIndex].eyePos = baryCoords.x*dev_primitives[index].v[0].eyePos +
-													  baryCoords.y*dev_primitives[index].v[1].eyePos +
-													  baryCoords.z*dev_primitives[index].v[2].eyePos;
-					dev_fragments[fragIndex].fcolor = baryCoords.x*dev_primitives[index].v[0].col +
-												 	  baryCoords.y*dev_primitives[index].v[1].col +
-												 	  baryCoords.z*dev_primitives[index].v[2].col;
-					dev_fragments[fragIndex].fNor = baryCoords.x*dev_primitives[index].v[0].fNor +
-													baryCoords.y*dev_primitives[index].v[1].fNor +
-													baryCoords.z*dev_primitives[index].v[2].fNor;
+					if (scaledZ == dev_depthBuffer[fragIndex])
+					{
+#if DISPLAY_DEPTH
+						//if testing Depth coloration
+						dev_fragments[fragIndex].fcolor = glm::vec3(dev_depthBuffer[fragIndex]/float(DEPTHSCALE),
+																    dev_depthBuffer[fragIndex]/float(DEPTHSCALE),
+																    dev_depthBuffer[fragIndex]/float(DEPTHSCALE));
+#elif DISPLAY_NORMAL
+						dev_fragments[fragIndex].fNor = baryCoords.x*dev_primitives[index].v[0].vNor +
+														baryCoords.y*dev_primitives[index].v[1].vNor +
+														baryCoords.z*dev_primitives[index].v[2].vNor;
+#elif FRAG_SHADING_LAMBERT
+						dev_fragments[fragIndex].eyePos = baryCoords.x*dev_primitives[index].v[0].eyePos +
+														  baryCoords.y*dev_primitives[index].v[1].eyePos +
+														  baryCoords.z*dev_primitives[index].v[2].eyePos;
+						dev_fragments[fragIndex].fcolor = baryCoords.x*dev_primitives[index].v[0].col +
+														  baryCoords.y*dev_primitives[index].v[1].col +
+														  baryCoords.z*dev_primitives[index].v[2].col;
+						dev_fragments[fragIndex].fNor = baryCoords.x*dev_primitives[index].v[0].vNor +
+														baryCoords.y*dev_primitives[index].v[1].vNor +
+														baryCoords.z*dev_primitives[index].v[2].vNor;
+#else
+						dev_fragments[fragIndex].fcolor = baryCoords.x*dev_primitives[index].v[0].col +
+														  baryCoords.y*dev_primitives[index].v[1].col +
+														  baryCoords.z*dev_primitives[index].v[2].col;
+#endif
 
-					//if testing Depth coloration
-					//dev_fragments[fragIndex].fcolor = glm::vec3(-dev_depthBuffer[fragIndex]/float(DEPTHSCALE),
-					//										      -dev_depthBuffer[fragIndex]/float(DEPTHSCALE),
-					//										      -dev_depthBuffer[fragIndex]/float(DEPTHSCALE));
+					}
 				}
 #else
 				////edgefunction implementation
