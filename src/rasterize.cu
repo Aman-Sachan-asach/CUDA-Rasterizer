@@ -192,7 +192,7 @@ __global__ void initDepth(int w, int h, int * depth, float * dev_depthBuffer)
 	{
 		int index = x + (y * w);
 		depth[index] = INT_MAX;
-		dev_depthBuffer[index] = FLT_MAX;
+		//dev_depthBuffer[index] = FLT_MAX;
 	}
 }
 
@@ -724,7 +724,8 @@ __global__ void _rasterize(int w, int h, int numTriangles, Primitive* dev_primit
 					if (z < dev_depthBuffer[fragIndex])
 					{
 						dev_depthBuffer[fragIndex] = z;
-						dev_fragments[fragIndex].color = glm::vec3(-z/1.0f, -z/1.0f, -z/1.0f);
+						//dev_fragments[fragIndex].color = glm::vec3(1.0f-z, 1.0f-z, 1.0f-z);
+						dev_fragments[fragIndex].color = glm::vec3(-z, -z, -z);
 					}
 				}
 #else
