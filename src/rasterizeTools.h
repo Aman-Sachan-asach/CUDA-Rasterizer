@@ -30,7 +30,8 @@ glm::vec3 multiplyMV(glm::mat4 m, glm::vec4 v) {
  * Finds the axis aligned bounding box for a given triangle.
  */
 __host__ __device__ static
-AABB getAABBForTriangle(const glm::vec3 tri[3]) {
+AABB getAABBForTriangle(const glm::vec3 tri[3]) 
+{
     AABB aabb;
     aabb.min = glm::vec3(
             min(min(tri[0].x, tri[1].x), tri[2].x),
@@ -98,4 +99,28 @@ float getZAtCoordinate(const glm::vec3 barycentricCoord, const glm::vec3 tri[3])
     return -(barycentricCoord.x * tri[0].z
            + barycentricCoord.y * tri[1].z
            + barycentricCoord.z * tri[2].z);
+}
+
+//For edge function rasterization --> the actual technique used in mordern GPUs thats much faster than scanline
+__host__ __device__ static
+bool edgeFunction(const glm::vec3 &a, const glm::vec3 &b, const glm::vec2 &p)
+{
+	//the dot product thing commented below is essentially what the function 
+	//is doing but the dot product is something i can easily understand at a glance
+	//glm::vec3 v1 = b-a;
+	//glm::vec3 v2 = p-a;	
+	//return (glm::dot(v1, v2)>=0);
+
+	return ((p.x - a.x) * (b.y - a.y) - (p.y - a.y) * (b.x - a.x) >= 0);
+}
+
+__host__ __device__ static
+bool IsPointInsideTriangle(const glm::vec3 &V0, const glm::vec3 &V1, const glm::vec3 &V2, const glm::vec2 &p)
+{
+	bool inside = true;
+	inside &= edgeFunction(V0, V1, p);
+	inside &= edgeFunction(V1, V2, p);
+	inside &= edgeFunction(V2, V0, p);
+
+	return inside;
 }
