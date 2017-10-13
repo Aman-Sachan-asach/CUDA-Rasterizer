@@ -49,7 +49,8 @@ AABB getAABBForTriangle(const glm::vec3 tri[3])
  * Calculate the signed area of a given triangle.
  */
 __host__ __device__ static
-float calculateSignedArea(const glm::vec3 tri[3]) {
+float calculateSignedArea(const glm::vec3 tri[3]) 
+{
     return 0.5 * ((tri[2].x - tri[0].x) * (tri[1].y - tri[0].y) - (tri[1].x - tri[0].x) * (tri[2].y - tri[0].y));
 }
 

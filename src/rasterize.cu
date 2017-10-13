@@ -22,6 +22,7 @@ static const int DEPTHSCALE = 10000;
 #define SCANLINE 1 // the other technique is using the edge Function
 #define DISPLAY_DEPTH 0
 #define DISPLAY_NORMAL 0
+#define DISPLAY_ABSNORMAL 0
 #define FRAG_SHADING_LAMBERT 1
 
 namespace 
@@ -43,19 +44,13 @@ namespace
 
 	struct VertexOut 
 	{
-		glm::vec4 pos;
-
-		// TODO: add new attributes to your VertexOut
-		// The attributes listed below might be useful, 
-		// but always feel free to modify on your own
-
-		glm::vec3 eyePos;	// eye space position used for shading
+		glm::vec4 vPos;
+		glm::vec3 vEyePos;	// eye space position used for shading
 		glm::vec3 vNor;	// eye space normal used for shading, cuz normal will go wrong after perspective transformation
-		glm::vec3 col;
+		glm::vec3 vColor;
 		glm::vec2 texcoord0;
 		TextureData* dev_diffuseTex = NULL;
 		int texWidth, texHeight;
-		// ...
 	};
 
 	struct Primitive 
@@ -66,17 +61,12 @@ namespace
 
 	struct Fragment 
 	{
-		glm::vec3 fcolor;
-
-		// TODO: add new attributes to your Fragment
-		// The attributes listed below might be useful, 
-		// but always feel free to modify on your own
-
-		glm::vec3 eyePos;	// eye space position used for shading
+		glm::vec3 fColor;
+		glm::vec3 fEyePos;	// eye space position used for shading
 		glm::vec3 fNor;
-		// VertexAttributeTexcoord texcoord0;
-		// TextureData* dev_diffuseTex;
-		// ...
+		float depth;
+		VertexAttributeTexcoord texcoord0;
+		TextureData* dev_diffuseTex;
 	};
 
 	struct PrimitiveDevBufPointers 
@@ -117,8 +107,7 @@ static int totalNumPrimitives = 0;
 static Primitive *dev_primitives = NULL;
 static Fragment *dev_fragmentBuffer = NULL;
 static glm::vec3 *dev_framebuffer = NULL;
-
-static int * dev_depth = NULL;	// you might need this buffer when doing depth test
+static int * dev_depth = NULL; //depth buffer
 
 /**
  * Kernel that writes the image to the OpenGL PBO directly.
@@ -148,12 +137,12 @@ __host__ __device__ glm::vec3 LambertFragShader(glm::vec3 pos, glm::vec3 color, 
 {
 	glm::vec3 finalColor;
 	glm::vec3 lightPosition = glm::vec3(10,20,10);
-	glm::vec3 lightVec = glm::normalize(pos - lightPosition);
+	glm::vec3 lightVec = glm::normalize(lightPosition - pos);
 	
 	glm::vec3 ambientLightColor = glm::vec3(0.2f, 0.2f, 0.2f);
-	float absDot = glm::abs(glm::dot(lightVec, normal));
-
-	finalColor = color*absDot + ambientLightColor;
+	float dot = glm::clamp(glm::dot(lightVec, normal), 0.0f, 1.0f);
+	
+	finalColor = color *dot + 0.05f;
 	return glm::clamp(finalColor, 0.0f, 1.0f);
 }
 
@@ -169,14 +158,21 @@ void render(int w, int h, Fragment *fragmentBuffer, glm::vec3 *framebuffer)
 
     if (x < w && y < h) 
 	{
-#if DISPLAY_DEPTH || DISPLAY_NORMAL
-		framebuffer[index] = glm::abs(fragmentBuffer[index].fcolor) + 0.15f;
+		//printf("color: %f %f %f \n", fragmentBuffer[index].fcolor.x, fragmentBuffer[index].fcolor.y, fragmentBuffer[index].fcolor.z);
+		//printf("normal: %f %f %f \n", fragmentBuffer[index].fNor.x, fragmentBuffer[index].fNor.y, fragmentBuffer[index].fNor.z);
+		//printf("eyePos: %f %f %f \n", fragmentBuffer[index].eyePos.x, fragmentBuffer[index].eyePos.y, fragmentBuffer[index].eyePos.z);
+#if DISPLAY_DEPTH
+		framebuffer[index] = glm::vec3(fragmentBuffer[index].depth);
+#elif DISPLAY_NORMAL
+		framebuffer[index] = fragmentBuffer[index].fNor;
+#elif DISPLAY_ABSNORMAL
+		framebuffer[index] = glm::abs(fragmentBuffer[index].fNor);
 #elif FRAG_SHADING_LAMBERT
-		framebuffer[index] = LambertFragShader(fragmentBuffer[index].eyePos,
-											   fragmentBuffer[index].fcolor,
+		framebuffer[index] = LambertFragShader(fragmentBuffer[index].fEyePos,
+											   fragmentBuffer[index].fColor,
 											   fragmentBuffer[index].fNor);
 #else
-		framebuffer[index] = glm::abs(fragmentBuffer[index].fcolor) + 0.15f;
+		framebuffer[index] = fragmentBuffer[index].fColor + 0.15f;
 #endif
     }
 }
@@ -682,11 +678,11 @@ __global__ void _vertexTransformAndAssembly( int numVertices,
 		//-------------- Vertex assembly --------------------
 		//---------------------------------------------------
 		// Assemble all attribute arrays into the primitive array
-		primitive.dev_verticesOut[vid].pos = vPos;
+		primitive.dev_verticesOut[vid].vPos = vPos;
 		primitive.dev_verticesOut[vid].vNor = vNor;
-		primitive.dev_verticesOut[vid].eyePos = glm::vec3(eyePos);
+		primitive.dev_verticesOut[vid].vEyePos = glm::vec3(eyePos);
 
-		primitive.dev_verticesOut[vid].col = glm::vec3(0,1,0);
+		primitive.dev_verticesOut[vid].vColor = glm::vec3(0,1,0);
 		//vo.dev_diffuseTex = ;
 		//vo.texcoord0 = ;
 	}
@@ -723,9 +719,9 @@ __global__ void _rasterize(int w, int h, int numTriangles, Primitive* dev_primit
 	if (index < numTriangles)
 	{
 		glm::vec3 tri[3];
-		tri[0] = glm::vec3(dev_primitives[index].v[0].pos);
-		tri[1] = glm::vec3(dev_primitives[index].v[1].pos);
-		tri[2] = glm::vec3(dev_primitives[index].v[2].pos);
+		tri[0] = glm::vec3(dev_primitives[index].v[0].vPos);
+		tri[1] = glm::vec3(dev_primitives[index].v[1].vPos);
+		tri[2] = glm::vec3(dev_primitives[index].v[2].vPos);
 		AABB boundingBox = getAABBForTriangle(tri);
 
 		for (int y = boundingBox.min.y; y <= boundingBox.max.y; ++y)
@@ -742,35 +738,71 @@ __global__ void _rasterize(int w, int h, int numTriangles, Primitive* dev_primit
 
 					//multiplying z value by a large static int because atomicMin is only defined for ints
 					//and atomicMin is needed to handle race conditions
-					int scaledZ = getZAtCoordinate(baryCoords, tri)*DEPTHSCALE;
+					float z = getZAtCoordinate(baryCoords, tri);
+					int scaledZ = z*DEPTHSCALE;
 					atomicMin(&dev_depthBuffer[fragIndex], scaledZ);
 					if (scaledZ == dev_depthBuffer[fragIndex])
 					{
-#if DISPLAY_DEPTH
-						//if testing Depth coloration
-						dev_fragments[fragIndex].fcolor = glm::vec3(dev_depthBuffer[fragIndex]/float(DEPTHSCALE),
-																    dev_depthBuffer[fragIndex]/float(DEPTHSCALE),
-																    dev_depthBuffer[fragIndex]/float(DEPTHSCALE));
-#elif DISPLAY_NORMAL
-						dev_fragments[fragIndex].fNor = baryCoords.x*dev_primitives[index].v[0].vNor +
-														baryCoords.y*dev_primitives[index].v[1].vNor +
-														baryCoords.z*dev_primitives[index].v[2].vNor;
-#elif FRAG_SHADING_LAMBERT
-						dev_fragments[fragIndex].eyePos = baryCoords.x*dev_primitives[index].v[0].eyePos +
-														  baryCoords.y*dev_primitives[index].v[1].eyePos +
-														  baryCoords.z*dev_primitives[index].v[2].eyePos;
-						dev_fragments[fragIndex].fcolor = baryCoords.x*dev_primitives[index].v[0].col +
-														  baryCoords.y*dev_primitives[index].v[1].col +
-														  baryCoords.z*dev_primitives[index].v[2].col;
-						dev_fragments[fragIndex].fNor = baryCoords.x*dev_primitives[index].v[0].vNor +
-														baryCoords.y*dev_primitives[index].v[1].vNor +
-														baryCoords.z*dev_primitives[index].v[2].vNor;
-#else
-						dev_fragments[fragIndex].fcolor = baryCoords.x*dev_primitives[index].v[0].col +
-														  baryCoords.y*dev_primitives[index].v[1].col +
-														  baryCoords.z*dev_primitives[index].v[2].col;
-#endif
+						//for perspective correct interpolation you need the z values
+						float z1 = -tri[0].z;
+						float z2 = -tri[1].z;
+						float z3 = -tri[2].z;
 
+						//printf("z values: %f %f %f %f \n", z, z1, z2, z3);
+
+						glm::vec3 v0eyePos = dev_primitives[index].v[0].vEyePos;
+						glm::vec3 v1eyePos = dev_primitives[index].v[1].vEyePos;
+						glm::vec3 v2eyePos = dev_primitives[index].v[2].vEyePos;
+
+						glm::vec3 v0color = dev_primitives[index].v[0].vColor;
+						glm::vec3 v1color = dev_primitives[index].v[1].vColor;
+						glm::vec3 v2color = dev_primitives[index].v[2].vColor;
+
+						glm::vec3 v0Nor = dev_primitives[index].v[0].vNor;
+						glm::vec3 v1Nor = dev_primitives[index].v[1].vNor;
+						glm::vec3 v2Nor = dev_primitives[index].v[2].vNor;
+												
+						//Uncomment to display triangle values
+							//printf("Tri0\n");
+							//printf("color: %f %f %f \n", v0color.x, v0color.y, v0color.z);
+							//printf("normal: %f %f %f \n", v0Nor.x, v0Nor.y, v0Nor.z);
+							//printf("eyePos: %f %f %f \n", v0eyePos.x, v0eyePos.y, v0eyePos.z);
+							//printf("Tri1\n");
+							//printf("color: %f %f %f \n", v1color.x, v1color.y, v1color.z);
+							//printf("normal: %f %f %f \n", v1Nor.x, v1Nor.y, v1Nor.z);
+							//printf("eyePos: %f %f %f \n", v1eyePos.x, v1eyePos.y, v1eyePos.z);
+							//printf("Tri2\n");
+							//printf("color: %f %f %f \n", v2color.x, v2color.y, v2color.z);
+							//printf("normal: %f %f %f \n", v2Nor.x, v2Nor.y, v2Nor.z);
+							//printf("eyePos: %f %f %f \n", v2eyePos.x, v2eyePos.y, v2eyePos.z);
+						
+						//if testing Depth coloration
+						dev_fragments[fragIndex].depth = dev_depthBuffer[fragIndex]/float(DEPTHSCALE);
+						dev_fragments[fragIndex].fNor = z*((v0Nor / z1)*baryCoords.x + 
+														   (v1Nor / z2)*baryCoords.y + 
+														   (v2Nor / z3)*baryCoords.z );
+						dev_fragments[fragIndex].fEyePos = z*((v0eyePos / z1)*baryCoords.x +
+															  (v1eyePos / z2)*baryCoords.y +
+															  (v2eyePos / z3)*baryCoords.z);
+						dev_fragments[fragIndex].fColor = z*((v0color / z1)*baryCoords.x +
+															 (v1color / z2)*baryCoords.y +
+															 (v2color / z3)*baryCoords.z);
+						//to make the normals follow convention:
+						//z is positive coming out of the screen
+						//x is positive to the right
+						//y is positive going up
+						dev_fragments[fragIndex].fNor.x *= -1.0f;
+						//dev_fragments[fragIndex].fNor.y *= 1.0f;
+						//dev_fragments[fragIndex].fNor.z *= 1.0f;
+
+						//clamp color and normals values
+						dev_fragments[fragIndex].fNor.x = glm::clamp(dev_fragments[fragIndex].fNor.x, 0.0f, 1.0f);
+						dev_fragments[fragIndex].fNor.y = glm::clamp(dev_fragments[fragIndex].fNor.y, 0.0f, 1.0f);
+						dev_fragments[fragIndex].fNor.z = glm::clamp(dev_fragments[fragIndex].fNor.z, 0.0f, 1.0f);
+
+						dev_fragments[fragIndex].fColor.x = glm::clamp(dev_fragments[fragIndex].fColor.x, 0.0f, 1.0f);
+						dev_fragments[fragIndex].fColor.y = glm::clamp(dev_fragments[fragIndex].fColor.y, 0.0f, 1.0f);
+						dev_fragments[fragIndex].fColor.z = glm::clamp(dev_fragments[fragIndex].fColor.z, 0.0f, 1.0f);
 					}
 				}
 #else
