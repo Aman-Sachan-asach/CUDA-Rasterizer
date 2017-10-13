@@ -108,6 +108,7 @@ static Primitive *dev_primitives = NULL;
 static Fragment *dev_fragmentBuffer = NULL;
 static glm::vec3 *dev_framebuffer = NULL;
 static int * dev_depth = NULL; //depth buffer
+static int * dev_mutex = NULL; //mutex buffer for depth
 
 /**
  * Kernel that writes the image to the OpenGL PBO directly.
@@ -193,7 +194,9 @@ void rasterizeInit(int w, int h)
     
 	cudaFree(dev_depth);
 	cudaMalloc(&dev_depth, width * height * sizeof(int));
-
+	cudaFree(dev_mutex);
+	cudaMalloc(&dev_mutex, sizeof(int));
+	
 	checkCUDAError("rasterizeInit");
 }
 
@@ -711,8 +714,57 @@ __global__ void _primitiveAssembly(int numIndices, int curPrimitiveBeginId,
 	}
 }
 
+__host__ __device__ void modifyFragment(Primitive* dev_primitives, Fragment* dev_fragments, 
+										int* dev_depthBuffer, float& z,
+										glm::vec3 tri[3], glm::vec3 baryCoords,
+										int& index, int& fragIndex)
+{
+	//for perspective correct interpolation you need the z values
+	float z1 = -tri[0].z;
+	float z2 = -tri[1].z;
+	float z3 = -tri[2].z;
+
+	glm::vec3 v0eyePos = dev_primitives[index].v[0].vEyePos;
+	glm::vec3 v1eyePos = dev_primitives[index].v[1].vEyePos;
+	glm::vec3 v2eyePos = dev_primitives[index].v[2].vEyePos;
+
+	glm::vec3 v0color = dev_primitives[index].v[0].vColor;
+	glm::vec3 v1color = dev_primitives[index].v[1].vColor;
+	glm::vec3 v2color = dev_primitives[index].v[2].vColor;
+
+	glm::vec3 v0Nor = dev_primitives[index].v[0].vNor;
+	glm::vec3 v1Nor = dev_primitives[index].v[1].vNor;
+	glm::vec3 v2Nor = dev_primitives[index].v[2].vNor;
+
+	//if testing Depth coloration
+	dev_fragments[fragIndex].depth = dev_depthBuffer[fragIndex]/float(DEPTHSCALE);
+	dev_fragments[fragIndex].fNor = z*((v0Nor / z1)*baryCoords.x + 
+									   (v1Nor / z2)*baryCoords.y + 
+									   (v2Nor / z3)*baryCoords.z );
+	dev_fragments[fragIndex].fEyePos = z*((v0eyePos / z1)*baryCoords.x +
+										  (v1eyePos / z2)*baryCoords.y +
+										  (v2eyePos / z3)*baryCoords.z);
+	dev_fragments[fragIndex].fColor = z*((v0color / z1)*baryCoords.x +
+										 (v1color / z2)*baryCoords.y +
+										 (v2color / z3)*baryCoords.z);
+	//to make the normals follow convention:
+	//z is positive coming out of the screen
+	//x is positive to the right
+	//y is positive going up
+	dev_fragments[fragIndex].fNor.x *= -1.0f;
+
+	//clamp color and normals values
+	dev_fragments[fragIndex].fNor.x = glm::clamp(dev_fragments[fragIndex].fNor.x, 0.0f, 1.0f);
+	dev_fragments[fragIndex].fNor.y = glm::clamp(dev_fragments[fragIndex].fNor.y, 0.0f, 1.0f);
+	dev_fragments[fragIndex].fNor.z = glm::clamp(dev_fragments[fragIndex].fNor.z, 0.0f, 1.0f);
+
+	dev_fragments[fragIndex].fColor.x = glm::clamp(dev_fragments[fragIndex].fColor.x, 0.0f, 1.0f);
+	dev_fragments[fragIndex].fColor.y = glm::clamp(dev_fragments[fragIndex].fColor.y, 0.0f, 1.0f);
+	dev_fragments[fragIndex].fColor.z = glm::clamp(dev_fragments[fragIndex].fColor.z, 0.0f, 1.0f);
+}
+
 __global__ void _rasterize(int w, int h, int numTriangles, Primitive* dev_primitives, 
-							Fragment* dev_fragments, int* dev_depthBuffer)
+							Fragment* dev_fragments, int* dev_depthBuffer, int* dev_mutex)
 {
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
 
@@ -736,74 +788,29 @@ __global__ void _rasterize(int w, int h, int numTriangles, Primitive* dev_primit
 				{
 					int fragIndex = x + y*w;
 
-					//multiplying z value by a large static int because atomicMin is only defined for ints
-					//and atomicMin is needed to handle race conditions
+					//multiplying z value by a large static int because atomicCAS is only defined for ints
+					//and atomicCAS is needed to handle race conditions along with the mutex lock
 					float z = getZAtCoordinate(baryCoords, tri);
 					int scaledZ = z*DEPTHSCALE;
-					atomicMin(&dev_depthBuffer[fragIndex], scaledZ);
-					if (scaledZ == dev_depthBuffer[fragIndex])
-					{
-						//for perspective correct interpolation you need the z values
-						float z1 = -tri[0].z;
-						float z2 = -tri[1].z;
-						float z3 = -tri[2].z;
 
-						//printf("z values: %f %f %f %f \n", z, z1, z2, z3);
+					bool isSet;
+					do {
+						isSet = (atomicCAS(dev_mutex, 0, 1) == 0);
+						if (isSet) 
+						{
+							// Critical section goes here.
+							// if it is afterward, a deadlock will occur.
 
-						glm::vec3 v0eyePos = dev_primitives[index].v[0].vEyePos;
-						glm::vec3 v1eyePos = dev_primitives[index].v[1].vEyePos;
-						glm::vec3 v2eyePos = dev_primitives[index].v[2].vEyePos;
+							if (scaledZ < dev_depthBuffer[fragIndex])
+							{
+								dev_depthBuffer[fragIndex] = scaledZ;
+								modifyFragment(dev_primitives, dev_fragments, dev_depthBuffer, z,
+									tri, baryCoords, index, fragIndex);
+							}
 
-						glm::vec3 v0color = dev_primitives[index].v[0].vColor;
-						glm::vec3 v1color = dev_primitives[index].v[1].vColor;
-						glm::vec3 v2color = dev_primitives[index].v[2].vColor;
-
-						glm::vec3 v0Nor = dev_primitives[index].v[0].vNor;
-						glm::vec3 v1Nor = dev_primitives[index].v[1].vNor;
-						glm::vec3 v2Nor = dev_primitives[index].v[2].vNor;
-												
-						//Uncomment to display triangle values
-							//printf("Tri0\n");
-							//printf("color: %f %f %f \n", v0color.x, v0color.y, v0color.z);
-							//printf("normal: %f %f %f \n", v0Nor.x, v0Nor.y, v0Nor.z);
-							//printf("eyePos: %f %f %f \n", v0eyePos.x, v0eyePos.y, v0eyePos.z);
-							//printf("Tri1\n");
-							//printf("color: %f %f %f \n", v1color.x, v1color.y, v1color.z);
-							//printf("normal: %f %f %f \n", v1Nor.x, v1Nor.y, v1Nor.z);
-							//printf("eyePos: %f %f %f \n", v1eyePos.x, v1eyePos.y, v1eyePos.z);
-							//printf("Tri2\n");
-							//printf("color: %f %f %f \n", v2color.x, v2color.y, v2color.z);
-							//printf("normal: %f %f %f \n", v2Nor.x, v2Nor.y, v2Nor.z);
-							//printf("eyePos: %f %f %f \n", v2eyePos.x, v2eyePos.y, v2eyePos.z);
-						
-						//if testing Depth coloration
-						dev_fragments[fragIndex].depth = dev_depthBuffer[fragIndex]/float(DEPTHSCALE);
-						dev_fragments[fragIndex].fNor = z*((v0Nor / z1)*baryCoords.x + 
-														   (v1Nor / z2)*baryCoords.y + 
-														   (v2Nor / z3)*baryCoords.z );
-						dev_fragments[fragIndex].fEyePos = z*((v0eyePos / z1)*baryCoords.x +
-															  (v1eyePos / z2)*baryCoords.y +
-															  (v2eyePos / z3)*baryCoords.z);
-						dev_fragments[fragIndex].fColor = z*((v0color / z1)*baryCoords.x +
-															 (v1color / z2)*baryCoords.y +
-															 (v2color / z3)*baryCoords.z);
-						//to make the normals follow convention:
-						//z is positive coming out of the screen
-						//x is positive to the right
-						//y is positive going up
-						dev_fragments[fragIndex].fNor.x *= -1.0f;
-						//dev_fragments[fragIndex].fNor.y *= 1.0f;
-						//dev_fragments[fragIndex].fNor.z *= 1.0f;
-
-						//clamp color and normals values
-						dev_fragments[fragIndex].fNor.x = glm::clamp(dev_fragments[fragIndex].fNor.x, 0.0f, 1.0f);
-						dev_fragments[fragIndex].fNor.y = glm::clamp(dev_fragments[fragIndex].fNor.y, 0.0f, 1.0f);
-						dev_fragments[fragIndex].fNor.z = glm::clamp(dev_fragments[fragIndex].fNor.z, 0.0f, 1.0f);
-
-						dev_fragments[fragIndex].fColor.x = glm::clamp(dev_fragments[fragIndex].fColor.x, 0.0f, 1.0f);
-						dev_fragments[fragIndex].fColor.y = glm::clamp(dev_fragments[fragIndex].fColor.y, 0.0f, 1.0f);
-						dev_fragments[fragIndex].fColor.z = glm::clamp(dev_fragments[fragIndex].fColor.z, 0.0f, 1.0f);
-					}
+							*dev_mutex = 0;
+						}
+					} while (!isSet);
 				}
 #else
 				////edgefunction implementation
@@ -864,15 +871,16 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
 		checkCUDAError("Vertex Processing and Primitive Assembly");
 	}
 	
+	cudaMemset(dev_mutex, 0, sizeof(int));//mutex for depth buffer
 	cudaMemset(dev_fragmentBuffer, 0, width * height * sizeof(Fragment));
 	initDepth <<<blockCount2d, blockSize2d >>>(width, height, dev_depth);
-	
+		
 	// rasterize --> looping over all primitives(triangles)
 	dim3 numThreadsPerBlock(128);
 	dim3 blockSize1d((totalNumPrimitives - 1) / numThreadsPerBlock.x + 1);
 	_rasterize <<<blockSize1d, numThreadsPerBlock>>>(width, height, totalNumPrimitives, 
 													dev_primitives, dev_fragmentBuffer,
-													dev_depth);
+													dev_depth, dev_mutex);
 
     // Copy depthbuffer colors into framebuffer
 	render <<<blockCount2d, blockSize2d >>>(width, height, dev_fragmentBuffer, dev_framebuffer);
@@ -917,6 +925,9 @@ void rasterizeFree()
     dev_framebuffer = NULL;
 
 	cudaFree(dev_depth);
+	dev_depth = NULL;
+
+	cudaFree(dev_mutex);
 	dev_depth = NULL;
 
     checkCUDAError("rasterize Free");
