@@ -11,6 +11,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <thrust/random.h>
+#include <thrust/execution_policy.h>
 #include <util/checkCUDAError.h>
 #include <util/tiny_gltf_loader.h>
 #include "rasterizeTools.h"
@@ -18,10 +19,10 @@
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
-static const int DEPTHSCALE = 10000;
+static const int DEPTHSCALE = INT_MAX;
 static const int numTilesX = 4;
 static const int numTilesY = 4;
-#define TILEBASED 1
+#define TILEBASED 0
 #define SCANLINE 1 // the other technique is using the edge Function
 #define DISPLAY_DEPTH 0
 #define DISPLAY_NORMAL 0
@@ -30,6 +31,7 @@ static const int numTilesY = 4;
 #define TEXTURE_MAPPING 1
 #define BILINEAR_FILTERING 1
 #define DEPTH_TEST 1
+#define BACKFACE_CULLING 0
 
 namespace 
 {
@@ -63,6 +65,7 @@ namespace
 	{
 		PrimitiveType primitiveType = Triangle;	// C++ 11 init
 		VertexOut v[3];
+		bool cull = false;
 	};
 
 	struct Fragment 
@@ -116,10 +119,9 @@ static glm::vec3 *dev_framebuffer = NULL;
 static int * dev_depth = NULL; //depth buffer
 static int * dev_mutex = NULL; //mutex buffer for depth
 
-/**
- * Kernel that writes the image to the OpenGL PBO directly.
- */
-__global__ void sendImageToPBO(uchar4 *pbo, int w, int h, glm::vec3 *image) 
+// Kernel that writes the image to the OpenGL PBO directly.
+__global__ 
+void sendImageToPBO(uchar4 *pbo, int w, int h, glm::vec3 *image) 
 {
     int x = (blockIdx.x * blockDim.x) + threadIdx.x;
     int y = (blockIdx.y * blockDim.y) + threadIdx.y;
@@ -139,7 +141,8 @@ __global__ void sendImageToPBO(uchar4 *pbo, int w, int h, glm::vec3 *image)
     }
 }
 
-__host__ __device__ glm::vec3 LambertFragShader(glm::vec3 pos, glm::vec3 color, glm::vec3 normal)
+__host__ __device__ 
+glm::vec3 LambertFragShader(glm::vec3 pos, glm::vec3 color, glm::vec3 normal)
 {
 	glm::vec3 finalColor;
 	glm::vec3 lightPosition = glm::vec3(10,20,10);
@@ -152,10 +155,9 @@ __host__ __device__ glm::vec3 LambertFragShader(glm::vec3 pos, glm::vec3 color, 
 	return glm::clamp(finalColor, 0.0f, 1.0f);
 }
 
-/** 
-* Writes fragment colors to the framebuffer
-*/
-__global__ void render(int w, int h, Fragment *fragmentBuffer, glm::vec3 *framebuffer) 
+//Writes fragment colors to the framebuffer
+__global__ 
+void render(int w, int h, Fragment *fragmentBuffer, glm::vec3 *framebuffer) 
 {
     int x = (blockIdx.x * blockDim.x) + threadIdx.x;
     int y = (blockIdx.y * blockDim.y) + threadIdx.y;
@@ -179,9 +181,7 @@ __global__ void render(int w, int h, Fragment *fragmentBuffer, glm::vec3 *frameb
     }
 }
 
-/**
- * Called once at the beginning of the program to allocate memory.
- */
+//Called once at the beginning of the program to allocate memory.
 void rasterizeInit(int w, int h) 
 {
     width = w;
@@ -201,7 +201,8 @@ void rasterizeInit(int w, int h)
 	checkCUDAError("rasterizeInit");
 }
 
-__global__ void initDepth(int w, int h, int * depth)
+__global__ 
+void initDepth(int w, int h, int * depth)
 {
 	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
 	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
@@ -213,10 +214,20 @@ __global__ void initDepth(int w, int h, int * depth)
 	}
 }
 
-/**
-* kern function with support for stride to sometimes replace cudaMemcpy
-* One thread is responsible for copying one component
-*/
+__global__
+void initCullValue(int numPrimitives, Primitive * dev_primitive)
+{
+	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+	if (index < numPrimitives)
+	{
+		dev_primitive[index].cull = false;
+	}
+}
+
+
+//kern function with support for stride to sometimes replace cudaMemcpy
+//One thread is responsible for copying one component
 __global__ 
 void _deviceBufferCopy(int N, BufferByte* dev_dst, const BufferByte* dev_src, int n, int byteStride, int byteOffset, int componentTypeByteSize) 
 {
@@ -649,10 +660,10 @@ void rasterizeSetBuffers(const tinygltf::Scene & scene)
 	}
 }
 
-__global__ void _vertexTransformAndAssembly( int numVertices, 
-											PrimitiveDevBufPointers primitive, 
-											glm::mat4 MVP, glm::mat4 MV, glm::mat3 MV_normal, 
-											int width, int height ) 
+__global__ 
+void _vertexTransformAndAssembly( int numVertices, PrimitiveDevBufPointers primitive, 
+								  glm::mat4 MVP, glm::mat4 MV, glm::mat3 MV_normal, 
+								  int width, int height ) 
 {
 	// vertex id
 	int vid = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -701,7 +712,8 @@ __global__ void _vertexTransformAndAssembly( int numVertices,
 
 static int curPrimitiveBeginId = 0;
 
-__global__ void _primitiveAssembly(int numIndices, int curPrimitiveBeginId, 
+__global__ 
+void _primitiveAssembly(int numIndices, int curPrimitiveBeginId, 
 						Primitive* dev_primitives, PrimitiveDevBufPointers primitive) 
 {
 	// index id
@@ -721,7 +733,6 @@ __global__ void _primitiveAssembly(int numIndices, int curPrimitiveBeginId,
 		// TODO: other primitive types (point, line)
 	}
 }
-
 
 __host__ __device__ static
 glm::vec3 getTextureColorAt(const TextureData* texture, const int& textureWidth, int& u, int& v)
@@ -767,10 +778,11 @@ glm::vec3 getBilinearFilteredColor(const TextureData* tex,
 }
 
 
-__host__ __device__ void modifyFragment(Primitive* dev_primitives, Fragment* dev_fragments, 
-										int* dev_depthBuffer, float& z,
-										glm::vec3 tri[3], glm::vec3 baryCoords,
-										int& index, int& fragIndex)
+__host__ __device__ 
+void modifyFragment(Primitive* dev_primitives, Fragment* dev_fragments, 
+					int* dev_depthBuffer, float& z,
+					glm::vec3 tri[3], glm::vec3 baryCoords,
+					int& index, int& fragIndex)
 {
 	//for perspective correct interpolation you need the z values
 	float z1 = -tri[0].z;
@@ -843,10 +855,11 @@ __host__ __device__ void modifyFragment(Primitive* dev_primitives, Fragment* dev
 	dev_fragments[fragIndex].fColor.z = glm::clamp(dev_fragments[fragIndex].fColor.z, 0.0f, 1.0f);
 }
 
-__device__ void DepthTest(Primitive* dev_primitives, Fragment* dev_fragments,
-								   int* dev_depthBuffer, int * dev_mutex, float& z,
-								   glm::vec3 tri[3], glm::vec3 baryCoords,
-								   int& index, int& fragIndex)
+__device__ 
+void DepthTest(Primitive* dev_primitives, Fragment* dev_fragments,
+			   int* dev_depthBuffer, int * dev_mutex, float& z,
+			   glm::vec3 tri[3], glm::vec3 baryCoords,
+			   int& index, int& fragIndex)
 {
 	//multiplying z value by a large static int because atomicCAS is only defined for ints
 	//and atomicCAS is needed to handle race conditions along with the mutex lock
@@ -872,8 +885,60 @@ __device__ void DepthTest(Primitive* dev_primitives, Fragment* dev_fragments,
 	} while (!isSet);
 }
 
-__global__ void _rasterizeScanLine(int w, int h, int numTriangles, Primitive* dev_primitives, 
-									Fragment* dev_fragments, int* dev_depthBuffer, int* dev_mutex)
+struct predicate_PrimitiveCulling
+{
+	__host__ __device__ bool operator()(const Primitive& x)
+	{
+		return (x.cull);
+	}
+};
+
+__global__
+void identifyBackFaces(int& numActiveTriangles, Primitive* dev_primitives, glm::vec3& camForward)
+{
+	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+	if (index < numActiveTriangles)
+	{
+		//check if the normal of the triangle face the camera or not
+		glm::vec3 p1 = glm::vec3(dev_primitives[index].v[0].vPos);
+		glm::vec3 p2 = glm::vec3(dev_primitives[index].v[1].vPos);
+		glm::vec3 p3 = glm::vec3(dev_primitives[index].v[2].vPos);
+
+		glm::vec3 triangleNormal = glm::cross(p1 - p2, p2 - p3);
+		if (glm::dot(triangleNormal, camForward) < 0)
+		{
+			//cull this triangle
+			dev_primitives[index].cull = true;
+		}
+	}
+}
+
+void BackFaceCulling(int& numActivePrimitives, Primitive* dev_primitives, glm::vec3& camForward)
+{
+	dim3 numThreadsPerBlock(128);
+	dim3 blockSize1d((numActivePrimitives - 1) / numThreadsPerBlock.x + 1);
+
+	initCullValue <<<blockSize1d, numThreadsPerBlock>>> (numActivePrimitives, dev_primitives);
+
+	//identify and mark the triangles to be culled
+	//identifyBackFaces <<<blockSize1d, numThreadsPerBlock>>> (numActivePrimitives, dev_primitives, camForward);
+	//checkCUDAError("face identification failed");
+
+	//Stream Compact your array of dev_primitives to cull out primitives that cant be seen or lit in a scene
+	//thrust::partition returns a pointer to the element in the array where the partition occurs 
+	Primitive* partition_point = thrust::partition(thrust::device, 
+												   dev_primitives, 
+												   dev_primitives + numActivePrimitives, 
+												   predicate_PrimitiveCulling());
+	checkCUDAError("partitioning and streamcompaction failed");
+	//int _numActivePrimitives = numActivePrimitives - (partition_point - dev_primitives);
+	//printf("%d \n", _numActivePrimitives);
+}
+
+__global__ 
+void _rasterizeScanLine(int w, int h, int numTriangles, Primitive* dev_primitives, 
+						Fragment* dev_fragments, int* dev_depthBuffer, int* dev_mutex)
 {
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
 
@@ -885,9 +950,15 @@ __global__ void _rasterizeScanLine(int w, int h, int numTriangles, Primitive* de
 		tri[2] = glm::vec3(dev_primitives[index].v[2].vPos);
 		AABB boundingBox = getAABBForTriangle(tri);
 
-		for (int y = boundingBox.min.y; y <= boundingBox.max.y; ++y)
+		//clamp BB to be within the window
+		int BBminX = glm::min(w, glm::max(0, int(boundingBox.min.x)));
+		int BBmaxX = glm::max(0, glm::min(w, int(boundingBox.max.x)));
+		int BBminY = glm::min(h, glm::max(0, int(boundingBox.min.y)));
+		int BBmaxY = glm::max(0, glm::min(h, int(boundingBox.max.y)));
+
+		for (int y = BBminY; y <= BBmaxY; ++y)
 		{
-			for (int x = boundingBox.min.x; x <= boundingBox.max.x; ++x)
+			for (int x = BBminX; x <= BBmaxX; ++x)
 			{
 				glm::vec3 baryCoords = calculateBarycentricCoordinate(tri, glm::vec2(x,y));
 				bool isInsideTriangle = isBarycentricCoordInBounds(baryCoords);
@@ -951,20 +1022,23 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
 		checkCUDAError("Vertex Processing and Primitive Assembly");
 	}
 	
-	//Implement Backface Culling Here
-	//loop over triangles and check if their normal is facing the camera view vector or not
-	// if it is not discard triangle
-	//discard can be handles via stream compaction --> thrust partition
+	int numActivePrimitives = totalNumPrimitives; //numActivePrimitives is the number of 
+												  //primitives left after backface culling
+
+#if BACKFACE_CULLING
+	glm::vec3 camForward = glm::vec3(1.0f,1.0f,1.0f);
+	BackFaceCulling(numActivePrimitives, dev_primitives, camForward);
+#endif
 	
 	//Reset Depth Buffer and mutex lock for depth buffer
 	cudaMemset(dev_mutex, 0, width * height * sizeof(int)); //mutex for depth buffer
 	cudaMemset(dev_fragmentBuffer, 0, width * height * sizeof(Fragment));
 	initDepth <<<blockCount2d, blockSize2d >>>(width, height, dev_depth);
-		
+	
 	dim3 numThreadsPerBlock(128);
 #if SCANLINE
 	// rasterize --> looping over all primitives(triangles)	
-	dim3 blockSize1d((totalNumPrimitives - 1) / numThreadsPerBlock.x + 1);
+	dim3 blockSize1d((numActivePrimitives - 1) / numThreadsPerBlock.x + 1);
 	_rasterizeScanLine <<<blockSize1d, numThreadsPerBlock>>>(width, height, totalNumPrimitives, 
 															 dev_primitives, dev_fragmentBuffer,
 															 dev_depth, dev_mutex);
@@ -1000,9 +1074,7 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
     checkCUDAError("copy render result to pbo");
 }
 
-/**
- * Called once at the end of the program to free CUDA memory.
- */
+//Called once at the end of the program to free CUDA memory.
 void rasterizeFree() 
 {
     // deconstruct primitives attribute/indices device buffer
