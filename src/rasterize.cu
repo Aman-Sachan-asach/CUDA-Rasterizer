@@ -19,12 +19,17 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 static const int DEPTHSCALE = 10000;
+static const int numTilesX = 4;
+static const int numTilesY = 4;
+#define TILEBASED 1
 #define SCANLINE 1 // the other technique is using the edge Function
 #define DISPLAY_DEPTH 0
 #define DISPLAY_NORMAL 0
 #define DISPLAY_ABSNORMAL 0
 #define FRAG_SHADING_LAMBERT 1
+#define TEXTURE_MAPPING 1
 #define BILINEAR_FILTERING 1
+#define DEPTH_TEST 1
 
 namespace 
 {
@@ -191,7 +196,7 @@ void rasterizeInit(int w, int h)
 	cudaFree(dev_depth);
 	cudaMalloc(&dev_depth, width * height * sizeof(int));
 	cudaFree(dev_mutex);
-	cudaMalloc(&dev_mutex, sizeof(int));
+	cudaMalloc(&dev_mutex, width * height * sizeof(int));
 	
 	checkCUDAError("rasterizeInit");
 }
@@ -800,7 +805,7 @@ __host__ __device__ void modifyFragment(Primitive* dev_primitives, Fragment* dev
 										    (v0UV / z2)*baryCoords.y +
 										    (v0UV / z3)*baryCoords.z);
 
-	if (dev_fragments[fragIndex].dev_diffuseTex != NULL)
+	if (TEXTURE_MAPPING && dev_fragments[fragIndex].dev_diffuseTex != NULL)
 	{
 #if BILINEAR_FILTERING
 		dev_fragments[fragIndex].fColor = getBilinearFilteredColor(dev_fragments[fragIndex].dev_diffuseTex,
@@ -838,8 +843,37 @@ __host__ __device__ void modifyFragment(Primitive* dev_primitives, Fragment* dev
 	dev_fragments[fragIndex].fColor.z = glm::clamp(dev_fragments[fragIndex].fColor.z, 0.0f, 1.0f);
 }
 
-__global__ void _rasterize(int w, int h, int numTriangles, Primitive* dev_primitives, 
-							Fragment* dev_fragments, int* dev_depthBuffer, int* dev_mutex)
+__device__ void DepthTest(Primitive* dev_primitives, Fragment* dev_fragments,
+								   int* dev_depthBuffer, int * dev_mutex, float& z,
+								   glm::vec3 tri[3], glm::vec3 baryCoords,
+								   int& index, int& fragIndex)
+{
+	//multiplying z value by a large static int because atomicCAS is only defined for ints
+	//and atomicCAS is needed to handle race conditions along with the mutex lock
+	int scaledZ = z*DEPTHSCALE;
+
+	bool isSet;
+	do
+	{
+		isSet = (atomicCAS(&dev_mutex[fragIndex], 0, 1) == 0);
+		if (isSet)
+		{
+			// Critical section goes here.
+			// if it is afterward, a deadlock will occur.
+			if (scaledZ < dev_depthBuffer[fragIndex])
+			{
+				dev_depthBuffer[fragIndex] = scaledZ;
+				modifyFragment(dev_primitives, dev_fragments, dev_depthBuffer, z,
+									tri, baryCoords, index, fragIndex);
+			}
+
+			dev_mutex[fragIndex] = 0;
+		}
+	} while (!isSet);
+}
+
+__global__ void _rasterizeScanLine(int w, int h, int numTriangles, Primitive* dev_primitives, 
+									Fragment* dev_fragments, int* dev_depthBuffer, int* dev_mutex)
 {
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
 
@@ -855,46 +889,20 @@ __global__ void _rasterize(int w, int h, int numTriangles, Primitive* dev_primit
 		{
 			for (int x = boundingBox.min.x; x <= boundingBox.max.x; ++x)
 			{
-#if SCANLINE
-				//scanline Implementation
 				glm::vec3 baryCoords = calculateBarycentricCoordinate(tri, glm::vec2(x,y));
 				bool isInsideTriangle = isBarycentricCoordInBounds(baryCoords);
 				if(isInsideTriangle)
 				{
 					int fragIndex = x + y*w;
-
-					//multiplying z value by a large static int because atomicCAS is only defined for ints
-					//and atomicCAS is needed to handle race conditions along with the mutex lock
 					float z = getZAtCoordinate(baryCoords, tri);
-					int scaledZ = z*DEPTHSCALE;
-
-					bool isSet;
-					do {
-						isSet = (atomicCAS(dev_mutex, 0, 1) == 0);
-						if (isSet) 
-						{
-							// Critical section goes here.
-							// if it is afterward, a deadlock will occur.
-							if (scaledZ < dev_depthBuffer[fragIndex])
-							{
-								dev_depthBuffer[fragIndex] = scaledZ;
-								modifyFragment(dev_primitives, dev_fragments, dev_depthBuffer, z,
-														tri, baryCoords, index, fragIndex);
-							}
-
-							*dev_mutex = 0;
-						}
-					} while (!isSet);
-				}
+#if DEPTH_TEST
+					DepthTest(dev_primitives, dev_fragments, dev_depthBuffer, dev_mutex,
+							 z, tri, baryCoords, index, fragIndex);
 #else
-				////edgefunction implementation
-				glm::vec2 point = glm::vec2(x,y);
-				if (IsPointInsideTriangle(tri[0], tri[1], tri[2], point))
-				{
-					int fragIndex = x + y*w;
-					dev_fragments[fragIndex].color = glm::vec3(0,1,0);
-				}
+					modifyFragment(dev_primitives, dev_fragments, dev_depthBuffer, z,
+									tri, baryCoords, index, fragIndex);
 #endif
+				}
 			}
 		}
 	}
@@ -906,7 +914,7 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
     int sideLength2d = 8;
     dim3 blockSize2d(sideLength2d, sideLength2d);
     dim3 blockCount2d((width  - 1) / blockSize2d.x + 1,
-		(height - 1) / blockSize2d.y + 1);
+					  (height - 1) / blockSize2d.y + 1);
 
 	//----------------------------------------------------------
 	//----------------- Rasterization pipeline------------------
@@ -943,16 +951,46 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
 		checkCUDAError("Vertex Processing and Primitive Assembly");
 	}
 	
-	cudaMemset(dev_mutex, 0, sizeof(int));//mutex for depth buffer
+	//Implement Backface Culling Here
+	//loop over triangles and check if their normal is facing the camera view vector or not
+	// if it is not discard triangle
+	//discard can be handles via stream compaction --> thrust partition
+	
+	//Reset Depth Buffer and mutex lock for depth buffer
+	cudaMemset(dev_mutex, 0, width * height * sizeof(int)); //mutex for depth buffer
 	cudaMemset(dev_fragmentBuffer, 0, width * height * sizeof(Fragment));
 	initDepth <<<blockCount2d, blockSize2d >>>(width, height, dev_depth);
 		
-	// rasterize --> looping over all primitives(triangles)
 	dim3 numThreadsPerBlock(128);
+#if SCANLINE
+	// rasterize --> looping over all primitives(triangles)	
 	dim3 blockSize1d((totalNumPrimitives - 1) / numThreadsPerBlock.x + 1);
-	_rasterize <<<blockSize1d, numThreadsPerBlock>>>(width, height, totalNumPrimitives, 
-													dev_primitives, dev_fragmentBuffer,
-													dev_depth, dev_mutex);
+	_rasterizeScanLine <<<blockSize1d, numThreadsPerBlock>>>(width, height, totalNumPrimitives, 
+															 dev_primitives, dev_fragmentBuffer,
+															 dev_depth, dev_mutex);
+#endif
+
+#if TILEBASED
+	//preprocess step looping over all triangles to bin them into buckets corresponding to the tiles
+	//Launch as many kernels as their are tiles inside a double for loop
+	//Discard tiles (ie kernel launches) that dont have any triangles inside them
+	//Each kernel is launched for the pixels contatined within it
+	//Each thread loops over the triangles inside the tile using the position of the pixel to avoid costly scanline
+	//use the edge function to determine if that pixel position lies inside a particular triangle or not
+	//rest of the stuff is the same
+
+
+	//edge function usage below
+	//#else
+	//				////edgefunction implementation
+	//				glm::vec2 point = glm::vec2(x,y);
+	//				if (IsPointInsideTriangle(tri[0], tri[1], tri[2], point))
+	//				{
+	//					int fragIndex = x + y*w;
+	//					dev_fragments[fragIndex].color = glm::vec3(0,1,0);
+	//				}
+	//#endif
+#endif
 
     // Copy depthbuffer colors into framebuffer
 	render <<<blockCount2d, blockSize2d >>>(width, height, dev_fragmentBuffer, dev_framebuffer);
