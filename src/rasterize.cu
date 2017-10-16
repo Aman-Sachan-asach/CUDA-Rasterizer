@@ -22,8 +22,8 @@
 static const int DEPTHSCALE = INT_MAX;
 static const int numTilesX = 4;
 static const int numTilesY = 4;
-#define TILEBASED 0
-#define SCANLINE 1 // the other technique is using the edge Function
+#define TILEBASED 0 // only use tilebased or scanline not both
+#define SCANLINE 1
 #define DISPLAY_DEPTH 0
 #define DISPLAY_NORMAL 0
 #define DISPLAY_ABSNORMAL 0
@@ -31,7 +31,7 @@ static const int numTilesY = 4;
 #define TEXTURE_MAPPING 1
 #define BILINEAR_FILTERING 1
 #define DEPTH_TEST 1
-#define BACKFACE_CULLING 0
+#define BACKFACE_CULLING 1
 
 namespace 
 {
@@ -65,7 +65,7 @@ namespace
 	{
 		PrimitiveType primitiveType = Triangle;	// C++ 11 init
 		VertexOut v[3];
-		bool cull = false;
+		bool cull;
 	};
 
 	struct Fragment 
@@ -113,6 +113,7 @@ static int width = 0;
 static int height = 0;
 
 static int totalNumPrimitives = 0;
+static int numActivePrimitives = 0;
 static Primitive *dev_primitives = NULL;
 static Fragment *dev_fragmentBuffer = NULL;
 static glm::vec3 *dev_framebuffer = NULL;
@@ -224,7 +225,6 @@ void initCullValue(int numPrimitives, Primitive * dev_primitive)
 		dev_primitive[index].cull = false;
 	}
 }
-
 
 //kern function with support for stride to sometimes replace cudaMemcpy
 //One thread is responsible for copying one component
@@ -887,29 +887,31 @@ void DepthTest(Primitive* dev_primitives, Fragment* dev_fragments,
 
 struct predicate_PrimitiveCulling
 {
-	__host__ __device__ bool operator()(const Primitive& x)
+	__host__ __device__ bool operator()(const Primitive &x)
 	{
 		return (x.cull);
 	}
 };
 
 __global__
-void identifyBackFaces(int& numActiveTriangles, Primitive* dev_primitives, glm::vec3& camForward)
+void identifyBackFaces(const int numActivePrimitives, Primitive* prims, const glm::vec3 camForward)
 {
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
-
-	if (index < numActiveTriangles)
+	
+	if (index < numActivePrimitives)
 	{
 		//check if the normal of the triangle face the camera or not
-		glm::vec3 p1 = glm::vec3(dev_primitives[index].v[0].vPos);
-		glm::vec3 p2 = glm::vec3(dev_primitives[index].v[1].vPos);
-		glm::vec3 p3 = glm::vec3(dev_primitives[index].v[2].vPos);
+		glm::vec3 p1 = glm::vec3(prims[index].v[0].vPos);
+		glm::vec3 p2 = glm::vec3(prims[index].v[1].vPos);
+		glm::vec3 p3 = glm::vec3(prims[index].v[2].vPos);
 
 		glm::vec3 triangleNormal = glm::cross(p1 - p2, p2 - p3);
-		if (glm::dot(triangleNormal, camForward) < 0)
+		float dot = glm::dot(triangleNormal, camForward);
+
+		if (dot < 0.0f)
 		{
 			//cull this triangle
-			dev_primitives[index].cull = true;
+			prims[index].cull = true;
 		}
 	}
 }
@@ -922,8 +924,8 @@ void BackFaceCulling(int& numActivePrimitives, Primitive* dev_primitives, glm::v
 	initCullValue <<<blockSize1d, numThreadsPerBlock>>> (numActivePrimitives, dev_primitives);
 
 	//identify and mark the triangles to be culled
-	//identifyBackFaces <<<blockSize1d, numThreadsPerBlock>>> (numActivePrimitives, dev_primitives, camForward);
-	//checkCUDAError("face identification failed");
+	identifyBackFaces <<<blockSize1d, numThreadsPerBlock>>> (numActivePrimitives, dev_primitives, camForward);
+	checkCUDAError("face identification failed");
 
 	//Stream Compact your array of dev_primitives to cull out primitives that cant be seen or lit in a scene
 	//thrust::partition returns a pointer to the element in the array where the partition occurs 
@@ -932,8 +934,8 @@ void BackFaceCulling(int& numActivePrimitives, Primitive* dev_primitives, glm::v
 												   dev_primitives + numActivePrimitives, 
 												   predicate_PrimitiveCulling());
 	checkCUDAError("partitioning and streamcompaction failed");
-	//int _numActivePrimitives = numActivePrimitives - (partition_point - dev_primitives);
-	//printf("%d \n", _numActivePrimitives);
+	numActivePrimitives = int(partition_point - dev_primitives);
+	//printf("%d \n", numActivePrimitives);
 }
 
 __global__ 
@@ -979,6 +981,39 @@ void _rasterizeScanLine(int w, int h, int numTriangles, Primitive* dev_primitive
 	}
 }
 
+void rasterizeTileBased(int w, int h, int numTriangles, Primitive* dev_primitives,
+						Fragment* dev_fragments, int* dev_depthBuffer, int* dev_mutex)
+{
+	int stride_x = glm::floor(w / numTilesX);
+	int stride_y = glm::floor(h / numTilesY);
+	dim3 numThreadsPerBlock(128);
+
+	for (int i = 0; i < w; i += stride_x)
+	{
+		for (int j = 0; j < h; j += stride_x)
+		{
+			//preprocess step looping over all triangles to bin them into buckets corresponding to the tiles
+			//Launch as many kernels as their are tiles inside a double for loop
+			//Discard tiles (ie kernel launches) that dont have any triangles inside them
+			//Each kernel is launched for the pixels contatined within it
+			//Each thread loops over the triangles inside the tile using the position of the pixel to avoid costly scanline
+			//use the edge function to determine if that pixel position lies inside a particular triangle or not
+			//rest of the stuff is the same
+		}
+	}
+
+	//edge function usage below
+	//#else
+	//				////edgefunction implementation
+	//				glm::vec2 point = glm::vec2(x,y);
+	//				if (IsPointInsideTriangle(tri[0], tri[1], tri[2], point))
+	//				{
+	//					int fragIndex = x + y*w;
+	//					dev_fragments[fragIndex].color = glm::vec3(0,1,0);
+	//				}
+	//#endif
+}
+
 //Perform rasterization.
 void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const glm::mat3 MV_normal) 
 {
@@ -1022,9 +1057,7 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
 		checkCUDAError("Vertex Processing and Primitive Assembly");
 	}
 	
-	int numActivePrimitives = totalNumPrimitives; //numActivePrimitives is the number of 
-												  //primitives left after backface culling
-
+	numActivePrimitives = totalNumPrimitives;
 #if BACKFACE_CULLING
 	glm::vec3 camForward = glm::vec3(1.0f,1.0f,1.0f);
 	BackFaceCulling(numActivePrimitives, dev_primitives, camForward);
@@ -1039,31 +1072,14 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
 #if SCANLINE
 	// rasterize --> looping over all primitives(triangles)	
 	dim3 blockSize1d((numActivePrimitives - 1) / numThreadsPerBlock.x + 1);
-	_rasterizeScanLine <<<blockSize1d, numThreadsPerBlock>>>(width, height, totalNumPrimitives, 
+	_rasterizeScanLine <<<blockSize1d, numThreadsPerBlock>>>(width, height, numActivePrimitives,
 															 dev_primitives, dev_fragmentBuffer,
 															 dev_depth, dev_mutex);
 #endif
 
 #if TILEBASED
-	//preprocess step looping over all triangles to bin them into buckets corresponding to the tiles
-	//Launch as many kernels as their are tiles inside a double for loop
-	//Discard tiles (ie kernel launches) that dont have any triangles inside them
-	//Each kernel is launched for the pixels contatined within it
-	//Each thread loops over the triangles inside the tile using the position of the pixel to avoid costly scanline
-	//use the edge function to determine if that pixel position lies inside a particular triangle or not
-	//rest of the stuff is the same
-
-
-	//edge function usage below
-	//#else
-	//				////edgefunction implementation
-	//				glm::vec2 point = glm::vec2(x,y);
-	//				if (IsPointInsideTriangle(tri[0], tri[1], tri[2], point))
-	//				{
-	//					int fragIndex = x + y*w;
-	//					dev_fragments[fragIndex].color = glm::vec3(0,1,0);
-	//				}
-	//#endif
+	rasterizeTileBased(width, height, numActivePrimitives, dev_primitives, dev_fragmentBuffer,
+					   dev_depth, dev_mutex);
 #endif
 
     // Copy depthbuffer colors into framebuffer
