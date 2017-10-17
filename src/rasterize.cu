@@ -26,20 +26,20 @@ static const int maxNumTiles = (numTilesX + 1)*(numTilesY + 1);
 
 // only use tilebased or scanline not both
 //Tile Based Rasterization -- only does triangular rasterization
-#define TILEBASED 1
+#define TILEBASED 0
 	#define DISPLAY_TILES 0
 
 //Scanline Rasterization
-#define SCANLINE 0
-	#define RASTERIZE_TRIANGLES 0;
-	#define RASTERIZE_LINES 1;
+#define SCANLINE 1
+	#define RASTERIZE_TRIANGLES 1;
+	#define RASTERIZE_LINES 0;
 	#define RASTERIZE_POINTS 0;
 
 //Shading stuff handled in the render function
 #define DISPLAY_DEPTH 0
 #define DISPLAY_NORMAL 0
 #define DISPLAY_ABSNORMAL 0
-#define FRAG_SHADING_LAMBERT 0
+#define FRAG_SHADING_LAMBERT 1
 
 //texture stuff
 #define TEXTURE_MAPPING 1
@@ -47,7 +47,7 @@ static const int maxNumTiles = (numTilesX + 1)*(numTilesY + 1);
 
 //Depth Testing and Culling
 #define DEPTH_TEST 1
-#define BACKFACE_CULLING 0
+#define BACKFACE_CULLING 1
 
 namespace 
 {
@@ -78,9 +78,8 @@ namespace
 	};
 
 	struct Tile {
-		int triIndices[500]; //indices of the triangles that each pixel in the tile has to check
+		int triIndices[1000]; //indices of the triangles that each pixel in the tile has to check
 							 //limit to 500 triangles in a tile
-		int triCount; //how many triangles have actually filled the list
 	};
 	
 	struct Primitive 
@@ -143,7 +142,7 @@ static Fragment *dev_fragmentBuffer = NULL;
 static glm::vec3 *dev_framebuffer = NULL;
 
 static Tile *dev_tiles = NULL;
-static int* dev_tileTriCount = NULL;
+static int* dev_tileTriCount = NULL; //how many triangles have actually filled the list
 static int* dev_tilemutex = NULL;
 
 static int * dev_depth = NULL; //depth buffer
@@ -221,6 +220,16 @@ void render(int w, int h, Fragment *fragmentBuffer, glm::vec3 *framebuffer)
 		#if TILEBASED
 			#if DISPLAY_TILES
 					framebuffer[index] = fragmentBuffer[index].fColor;
+			#elif DISPLAY_DEPTH
+								framebuffer[index] = glm::vec3(fragmentBuffer[index].depth);
+			#elif DISPLAY_NORMAL
+								framebuffer[index] = fragmentBuffer[index].fNor;
+			#elif DISPLAY_ABSNORMAL
+								framebuffer[index] = glm::abs(fragmentBuffer[index].fNor);
+			#elif FRAG_SHADING_LAMBERT
+								framebuffer[index] = LambertFragShader(fragmentBuffer[index].fEyePos,
+									fragmentBuffer[index].fColor,
+									fragmentBuffer[index].fNor);
 			#else
 					framebuffer[index] = fragmentBuffer[index].fColor + 0.15f;
 			#endif
@@ -992,7 +1001,6 @@ void BackFaceCulling(int& numActivePrimitives, Primitive* dev_primitives, glm::v
 												   predicate_PrimitiveCulling());
 	checkCUDAError("partitioning and streamcompaction failed");
 	numActivePrimitives = int(partition_point - dev_primitives);
-	//printf("%d \n", numActivePrimitives);
 }
 
 __device__
@@ -1150,39 +1158,6 @@ void RasterizePixels(int pixelXoffset, int pixelYoffset , int numpixelsX, int nu
 	}
 }
 
-__global__ void bucketPrimitivesIntoTiles(int w, int stride_x, int stride_y, int numTriangles,
-										  Tile* dev_tiles, Primitive* dev_primitives)
-{
-	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
-
-	if (index < numTriangles)
-	{
-		glm::vec3 tri[3];
-		tri[0] = glm::vec3(dev_primitives[index].v[0].vPos);
-		tri[1] = glm::vec3(dev_primitives[index].v[1].vPos);
-		tri[2] = glm::vec3(dev_primitives[index].v[2].vPos);
-		AABB boundingBox = getAABBForTriangle(tri);
-		
-		//if boundingbox of triangle lies inside tile add it to tile triangle list
-		int tilesX = (int)glm::ceil(double(w) / double(stride_x));
-
-		int tileidminX = glm::floor(boundingBox.min.x / stride_x);
-		int tileidmaxX = glm::ceil(boundingBox.max.x / stride_x);
-		int tileidminY = glm::floor(boundingBox.min.y / stride_y);
-		int tileidmaxY = glm::ceil(boundingBox.max.y / stride_y);
-
-		for (int i = tileidminY; i < tileidmaxY; i++)
-		{
-			for (int j = tileidminX; j < tileidmaxX; j++)
-			{
-				int tileID = j + i*(tilesX);
-				dev_tiles[tileID].triIndices[dev_tiles[tileID].triCount] = index;
-				dev_tiles[tileID].triCount++;
-			}
-		}
-	}
-}
-
 __global__ void bucketPrims_TileMutex(int w, int stride_x, int stride_y,
 									int numTriangles, 
 									Primitive* dev_primitives,
@@ -1238,17 +1213,18 @@ __global__ void bucketPrims_TileMutex(int w, int stride_x, int stride_y,
 	}
 }
 
-__global__ void resetTiles(int numTiles, int stride_x, int stride_y, Tile* dev_tiles)
+__global__ 
+void resetTiles(int numTiles, int stride_x, int stride_y, Tile* dev_tiles, int* dev_tileTriCount)
 {
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
 
 	if (index < numTiles)
 	{
-		for (int i = 0; i < dev_tiles[index].triCount; i++)
+		for (int i = 0; i < dev_tileTriCount[index]; i++)
 		{
 			dev_tiles[index].triIndices[i] = 0;
 		}
-		dev_tiles[index].triCount = 0;
+		dev_tileTriCount[index] = 0;
 	}
 }
 
@@ -1262,17 +1238,15 @@ void rasterizeTileBased(int w, int h, int numTriangles, Tile* dev_tiles, Primiti
 
 	//reset tile triangles
 	dim3 blockCount1d_tiles(((numTiles - 1) / numThreadsPerBlock.x) + 1);
-	resetTiles <<<blockCount1d_tiles, numThreadsPerBlock>>> (numTiles, stride_x, stride_y, dev_tiles);
+	resetTiles <<<blockCount1d_tiles, numThreadsPerBlock>>> (numTiles, stride_x, stride_y, 
+															 dev_tiles, dev_tileTriCount);
 
 	//preprocess step looping over all triangles to bin them into buckets corresponding to the tiles
 	dim3 blockCount1d_triangles(((numTriangles - 1) / numThreadsPerBlock.x) + 1);
-	//bucketPrimitivesIntoTiles <<<blockCount1d_triangles, numThreadsPerBlock>>> (w, stride_x, stride_y, 
-	//																			numTriangles,
-	//																			dev_tiles, dev_primitives);
-	bucketPrims_TileMutex <<<blockCount1d_triangles, numThreadsPerBlock >>> ( w, stride_x, stride_y,
-																			numTriangles, dev_primitives,
-																			dev_tiles, dev_tileTriCount, 
-																			dev_tilemutex);
+	bucketPrims_TileMutex <<<blockCount1d_triangles, numThreadsPerBlock >>> (w, stride_x, stride_y,
+																			 numTriangles, dev_primitives,
+																			 dev_tiles, dev_tileTriCount, 
+																			 dev_tilemutex);
 
 	int sideLength2d = 8;
 	dim3 blockSize2d(sideLength2d, sideLength2d);
@@ -1296,18 +1270,16 @@ void rasterizeTileBased(int w, int h, int numTriangles, Tile* dev_tiles, Primiti
 
 			int pixelXoffset = tileXcount*stride_x;
 			int pixelYoffset = tileYcount*stride_y;
-			
-			//printf("%d %d \n", pixelXoffset, pixelYoffset);
 
 			dim3 blockCount2d_tilePixels((numpixelsX - 1) / blockSize2d.x + 1,
 										 (numpixelsY - 1) / blockSize2d.y + 1);
 			RasterizePixels <<<blockCount2d_tilePixels, blockSize2d >>> (pixelXoffset, pixelYoffset,
-																				numpixelsX, numpixelsY, w,
-																				tileID, dev_tiles, 
-																				dev_primitives,
-																				dev_fragments,
-																				dev_tileTriCount,
-																				dev_depthBuffer, dev_mutex);
+																		 numpixelsX, numpixelsY, w,
+																		 tileID, dev_tiles, 
+																		 dev_primitives,
+																		 dev_fragments,
+																		 dev_tileTriCount,
+																		 dev_depthBuffer, dev_mutex);
 			checkCUDAError("tile rasterization failed");
 
 			tileXcount++;
@@ -1365,10 +1337,11 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
 	glm::vec3 camForward = glm::vec3(1.0f,1.0f,1.0f);
 	BackFaceCulling(numActivePrimitives, dev_primitives, camForward);
 #endif
-	
+
+	//reset fragment buffer
+	cudaMemset(dev_fragmentBuffer, 0, width * height * sizeof(Fragment));
 	//Reset Depth Buffer and mutex lock for depth buffer
 	cudaMemset(dev_mutex, 0, width * height * sizeof(int)); //mutex for depth buffer
-	cudaMemset(dev_fragmentBuffer, 0, width * height * sizeof(Fragment));
 	initDepth <<<blockCount2d, blockSize2d >>>(width, height, dev_depth);
 	
 	dim3 numThreadsPerBlock(128);
