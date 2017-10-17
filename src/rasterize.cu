@@ -22,16 +22,20 @@
 static const int DEPTHSCALE = INT_MAX;
 static const int numTilesX = 16;
 static const int numTilesY = 16;
-#define TILEBASED 1 // only use tilebased or scanline not both
-#define SCANLINE 0
+#define TILEBASED 0 // only use tilebased or scanline not both
+#define DISPLAY_TILES 0
+#define SCANLINE 1
 #define DISPLAY_DEPTH 0
 #define DISPLAY_NORMAL 0
 #define DISPLAY_ABSNORMAL 0
-#define FRAG_SHADING_LAMBERT 1
+#define FRAG_SHADING_LAMBERT 0
 #define TEXTURE_MAPPING 1
 #define BILINEAR_FILTERING 1
 #define DEPTH_TEST 1
-#define BACKFACE_CULLING 1
+#define BACKFACE_CULLING 0
+#define RASTERIZE_TRIANGLES 0;
+#define RASTERIZE_LINES 0;
+#define RASTERIZE_POINTS 1;
 
 namespace 
 {
@@ -62,7 +66,7 @@ namespace
 	};
 
 	struct Tile {
-		int triIndices[2000]; //indices of the triangles that each pixel in the tile has to check
+		int triIndices[500]; //indices of the triangles that each pixel in the tile has to check
 							 //limit to 500 triangles in a tile
 		int triCount; //how many triangles have actually filled the list
 	};
@@ -160,9 +164,9 @@ glm::vec3 LambertFragShader(glm::vec3 pos, glm::vec3 color, glm::vec3 normal)
 	glm::vec3 lightVec = glm::normalize(lightPosition - pos);
 	
 	glm::vec3 ambientLightColor = glm::vec3(0.2f, 0.2f, 0.2f);
-	float dot = glm::clamp(glm::dot(lightVec, normal), 0.0f, 1.0f);
+	float dot = glm::clamp(glm::abs(glm::dot(lightVec, normal)), 0.0f, 1.0f);
 	
-	finalColor = color *dot + 0.05f;
+	finalColor = color *dot + ambientLightColor;
 	return glm::clamp(finalColor, 0.0f, 1.0f);
 }
 
@@ -176,19 +180,36 @@ void render(int w, int h, Fragment *fragmentBuffer, glm::vec3 *framebuffer)
 
     if (x < w && y < h) 
 	{
-#if DISPLAY_DEPTH
-		framebuffer[index] = glm::vec3(fragmentBuffer[index].depth);
-#elif DISPLAY_NORMAL
-		framebuffer[index] = fragmentBuffer[index].fNor;
-#elif DISPLAY_ABSNORMAL
-		framebuffer[index] = glm::abs(fragmentBuffer[index].fNor);
-#elif FRAG_SHADING_LAMBERT
-		framebuffer[index] = LambertFragShader(fragmentBuffer[index].fEyePos,
-											   fragmentBuffer[index].fColor,
-											   fragmentBuffer[index].fNor);
-#else
-		framebuffer[index] = fragmentBuffer[index].fColor + 0.15f;
-#endif
+		#if SCANLINE
+			#if RASTERIZE_TRIANGLES
+				#if DISPLAY_DEPTH
+						framebuffer[index] = glm::vec3(fragmentBuffer[index].depth);
+				#elif DISPLAY_NORMAL
+						framebuffer[index] = fragmentBuffer[index].fNor;
+				#elif DISPLAY_ABSNORMAL
+						framebuffer[index] = glm::abs(fragmentBuffer[index].fNor);
+				#elif FRAG_SHADING_LAMBERT
+						framebuffer[index] = LambertFragShader(fragmentBuffer[index].fEyePos,
+															   fragmentBuffer[index].fColor,
+															   fragmentBuffer[index].fNor);
+				#else
+						framebuffer[index] = fragmentBuffer[index].fColor + 0.15f;
+				#endif
+			#endif
+			#if RASTERIZE_LINES
+					framebuffer[index] = fragmentBuffer[index].fColor + 0.15f;
+			#endif
+			#if RASTERIZE_POINTS
+					framebuffer[index] = fragmentBuffer[index].fColor + 0.15f;
+			#endif
+		#endif
+		#if TILEBASED
+			#if DISPLAY_TILES
+					framebuffer[index] = fragmentBuffer[index].fColor;
+			#else
+					framebuffer[index] = fragmentBuffer[index].fColor + 0.15f;
+			#endif
+		#endif
     }
 }
 
@@ -206,6 +227,7 @@ void rasterizeInit(int w, int h)
     
 	cudaFree(dev_tiles);
 	cudaMalloc(&dev_tiles, (numTilesX + 1) * (numTilesY + 1) * sizeof(Tile));
+	cudaMemset(dev_framebuffer, 0, (numTilesX + 1) * (numTilesY + 1) * sizeof(glm::vec3));
 
 	cudaFree(dev_depth);
 	cudaMalloc(&dev_depth, width * height * sizeof(int));
@@ -951,6 +973,84 @@ void BackFaceCulling(int& numActivePrimitives, Primitive* dev_primitives, glm::v
 	//printf("%d \n", numActivePrimitives);
 }
 
+__device__
+void _rasterizeTriangles(int w, int h, int index, glm::vec3 *tri,
+						 Primitive* dev_primitives, Fragment* dev_fragments, 
+						 int* dev_depthBuffer, int* dev_mutex)
+{
+	AABB boundingBox = getAABBForTriangle(tri);
+
+	//clamp BB to be within the window
+	int BBminX = glm::min(w, glm::max(0, int(boundingBox.min.x)));
+	int BBmaxX = glm::max(0, glm::min(w, int(boundingBox.max.x)));
+	int BBminY = glm::min(h, glm::max(0, int(boundingBox.min.y)));
+	int BBmaxY = glm::max(0, glm::min(h, int(boundingBox.max.y)));
+
+	for (int y = BBminY; y <= BBmaxY; ++y)
+	{
+		for (int x = BBminX; x <= BBmaxX; ++x)
+		{
+			glm::vec3 baryCoords = calculateBarycentricCoordinate(tri, glm::vec2(x, y));
+			bool isInsideTriangle = isBarycentricCoordInBounds(baryCoords);
+			if (isInsideTriangle)
+			{
+				int fragIndex = x + y*w;
+				float z = getZAtCoordinate(baryCoords, tri);
+#if DEPTH_TEST
+				DepthTest(dev_primitives, dev_fragments, dev_depthBuffer, dev_mutex,
+					z, tri, baryCoords, index, fragIndex);
+#else
+				modifyFragment(dev_primitives, dev_fragments, dev_depthBuffer, z,
+					tri, baryCoords, index, fragIndex);
+#endif
+			}
+		}
+	}
+}
+
+__device__
+void _rasterizeTriangleAsLines(int width, int height, const int *indicies,
+								Fragment* dev_fragments, glm::vec3 *tri)
+{
+	int x1, x2, y1, y2, dx, dy, y, fragIndex;
+	for (int index = 0; index < 6; index += 2)
+	{
+		x1 = tri[indicies[index]].x;    
+		y1 = tri[indicies[index]].y;
+		x2 = tri[indicies[index + 1]].x;  
+		y2 = tri[indicies[index + 1]].y;
+		dx = x2 - x1;                   
+		dy = y2 - y1;
+		for (int x = x1; x <= x2; x++)
+		{
+			y = y1 + dy * (x - x1) / dx;
+			fragIndex = x + y * width;
+			if ((x >= 0 && x <= width - 1) && 
+				(y >= 0 && y <= height - 1))
+			{
+				dev_fragments[fragIndex].fColor = glm::vec3(0.0f, 0.0f, 1.0f);
+			}				
+		}
+	}
+}
+
+__device__
+void _rasterizeTriangleAsPoints(int width, int height, Fragment* dev_fragments, glm::vec3 *tri)
+{
+	int x, y, fragIndex;
+	for (int vertexId = 0; vertexId < 3; ++vertexId)
+	{
+		x = tri[vertexId].x;
+		y = tri[vertexId].y;
+		int fragIndex = x + y * width;
+		if ((x >= 0 && x <= width - 1) && 
+			(y >= 0 && y <= height - 1))
+		{
+			dev_fragments[fragIndex].fColor = glm::vec3(1.0f, 0.0f, 0.0f);
+		}
+	}
+}
+
 __global__ 
 void _rasterizeScanLine(int w, int h, int numTriangles, Primitive* dev_primitives, 
 						Fragment* dev_fragments, int* dev_depthBuffer, int* dev_mutex)
@@ -963,34 +1063,18 @@ void _rasterizeScanLine(int w, int h, int numTriangles, Primitive* dev_primitive
 		tri[0] = glm::vec3(dev_primitives[index].v[0].vPos);
 		tri[1] = glm::vec3(dev_primitives[index].v[1].vPos);
 		tri[2] = glm::vec3(dev_primitives[index].v[2].vPos);
-		AABB boundingBox = getAABBForTriangle(tri);
 
-		//clamp BB to be within the window
-		int BBminX = glm::min(w, glm::max(0, int(boundingBox.min.x)));
-		int BBmaxX = glm::max(0, glm::min(w, int(boundingBox.max.x)));
-		int BBminY = glm::min(h, glm::max(0, int(boundingBox.min.y)));
-		int BBmaxY = glm::max(0, glm::min(h, int(boundingBox.max.y)));
-
-		for (int y = BBminY; y <= BBmaxY; ++y)
-		{
-			for (int x = BBminX; x <= BBmaxX; ++x)
-			{
-				glm::vec3 baryCoords = calculateBarycentricCoordinate(tri, glm::vec2(x,y));
-				bool isInsideTriangle = isBarycentricCoordInBounds(baryCoords);
-				if(isInsideTriangle)
-				{
-					int fragIndex = x + y*w;
-					float z = getZAtCoordinate(baryCoords, tri);
-#if DEPTH_TEST
-					DepthTest(dev_primitives, dev_fragments, dev_depthBuffer, dev_mutex,
-							 z, tri, baryCoords, index, fragIndex);
-#else
-					modifyFragment(dev_primitives, dev_fragments, dev_depthBuffer, z,
-									tri, baryCoords, index, fragIndex);
+#if RASTERIZE_TRIANGLES
+		_rasterizeTriangles(w, h, index, tri, dev_primitives, dev_fragments, dev_depthBuffer, dev_mutex);
 #endif
-				}
-			}
-		}
+#if RASTERIZE_LINES
+		const int indices[] = { 0,1,1,2,2,0 };
+		_rasterizeTriangleAsLines(w, h, indices, dev_fragments, tri);
+#endif
+#if RASTERIZE_POINTS
+		_rasterizeTriangleAsPoints(w, h, dev_fragments, tri);
+#endif
+
 	}
 }
 
@@ -1010,7 +1094,11 @@ void RasterizePixels(int pixelXoffset, int pixelYoffset , int numpixelsX, int nu
 		//Discard tiles (ie kernel launches) that dont have any triangles inside them --> implicitly done by for loop
 		for (int i = 0; i < dev_tiles[tileID].triCount; i++)
 		{
-			//dev_fragments[index].fColor = glm::vec3(1, 0, 0);
+			//printf("tile %d: %d \n", tileID, dev_tiles[tileID].triCount);
+#if DISPLAY_TILES
+			dev_fragments[index].fColor = glm::vec3(1, 0, 0);
+			return;
+#endif
 			int triangleIndex = dev_tiles[tileID].triIndices[i];
 			glm::vec3 tri[3];
 			tri[0] = glm::vec3(dev_primitives[triangleIndex].v[0].vPos);
@@ -1038,7 +1126,7 @@ void RasterizePixels(int pixelXoffset, int pixelYoffset , int numpixelsX, int nu
 	}
 }
 
-__global__ void bucketPrimitivesIntoTiles(int w, int h, int stride_x, int stride_y, int numTriangles,
+__global__ void bucketPrimitivesIntoTiles(int w, int stride_x, int stride_y, int numTriangles,
 										  Tile* dev_tiles, Primitive* dev_primitives)
 {
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -1053,7 +1141,6 @@ __global__ void bucketPrimitivesIntoTiles(int w, int h, int stride_x, int stride
 		
 		//if boundingbox of triangle lies inside tile add it to tile triangle list
 		int tilesX = (int)glm::ceil(double(w) / double(stride_x));
-		//int tilesY = (int)glm::ceil(double(h) / double(stride_y));
 
 		int tileidminX = glm::floor(boundingBox.min.x / stride_x);
 		int tileidmaxX = glm::ceil(boundingBox.max.x / stride_x);
@@ -1072,12 +1159,16 @@ __global__ void bucketPrimitivesIntoTiles(int w, int h, int stride_x, int stride
 	}
 }
 
-__global__ void resetTiles(int w, int h, int numTiles, int stride_x, int stride_y, Tile* dev_tiles)
+__global__ void resetTiles(int numTiles, int stride_x, int stride_y, Tile* dev_tiles)
 {
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
 
 	if (index < numTiles)
 	{
+		for (int i = 0; i < dev_tiles[index].triCount; i++)
+		{
+			dev_tiles[index].triIndices[i] = 0;
+		}
 		dev_tiles[index].triCount = 0;
 	}
 }
@@ -1092,11 +1183,11 @@ void rasterizeTileBased(int w, int h, int numTriangles, Tile* dev_tiles, Primiti
 
 	//reset tile triangles
 	dim3 blockCount1d_tiles(((numTiles - 1) / numThreadsPerBlock.x) + 1);
-	resetTiles <<<blockCount1d_tiles, numThreadsPerBlock>>> (w, h, numTiles, stride_x, stride_y, dev_tiles);
+	resetTiles <<<blockCount1d_tiles, numThreadsPerBlock>>> (numTiles, stride_x, stride_y, dev_tiles);
 
 	//preprocess step looping over all triangles to bin them into buckets corresponding to the tiles
 	dim3 blockCount1d_triangles(((numTriangles - 1) / numThreadsPerBlock.x) + 1);
-	bucketPrimitivesIntoTiles <<<blockCount1d_triangles, numThreadsPerBlock>>> (w, h, stride_x, stride_y, 
+	bucketPrimitivesIntoTiles <<<blockCount1d_triangles, numThreadsPerBlock>>> (w, stride_x, stride_y, 
 																				numTriangles,
 																				dev_tiles, dev_primitives);
 	
