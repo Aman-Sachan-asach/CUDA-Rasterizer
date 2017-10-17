@@ -20,8 +20,8 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 static const int DEPTHSCALE = INT_MAX;
-static const int numTilesX = 4;
-static const int numTilesY = 4;
+static const int numTilesX = 16;
+static const int numTilesY = 16;
 #define TILEBASED 1 // only use tilebased or scanline not both
 #define SCANLINE 0
 #define DISPLAY_DEPTH 0
@@ -31,7 +31,7 @@ static const int numTilesY = 4;
 #define TEXTURE_MAPPING 1
 #define BILINEAR_FILTERING 1
 #define DEPTH_TEST 1
-#define BACKFACE_CULLING 0
+#define BACKFACE_CULLING 1
 
 namespace 
 {
@@ -696,7 +696,7 @@ void _vertexTransformAndAssembly( int numVertices, PrimitiveDevBufPointers primi
 		vPos.x = (vPos.x + 1.0f)*float(width)*0.5f;
 		vPos.y = (1.0f - vPos.y)*float(height)*0.5f; //now in pixel space or window coordinates
 		
-		vPos.z = -vPos.z; // to convert z from a 0 to -1 range to a 0 to 1 range
+		vPos.z = -(vPos.z+1.0f)*0.5f; // to convert z from a 1 to -1 range to a 0 to 1 range
 
 		glm::vec3 vNor = primitive.dev_normal[vid];
 		vNor = glm::normalize(MV_normal*vNor);
@@ -995,40 +995,46 @@ void _rasterizeScanLine(int w, int h, int numTriangles, Primitive* dev_primitive
 }
 
 __global__ 
-void RasterizePixels(int numPixels, int pixelIndexMin, int pixelIndexMax, int tileID, Tile* dev_tiles,
+void RasterizePixels(int pixelXoffset, int pixelYoffset , int numpixelsX, int numpixelsY, 
+					 int imageWidth, int tileID, Tile* dev_tiles, 
 					 Primitive* dev_primitives, Fragment* dev_fragments, 
 					 int* dev_depthBuffer, int* dev_mutex)
 {
-	//CHECK ENTIRE FUNCTION ESPECIALLY HOW THE PIXELS ARE SCHEDULED
-	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
-
-	if (index >= pixelIndexMin && index < pixelIndexMax)
+	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
+	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
+	int index = (x+pixelXoffset) + ((y+ pixelYoffset) * imageWidth);
+		
+	if (x < numpixelsX && y < numpixelsY)
 	{
 		//Each thread loops over the triangles inside the tile
+		//Discard tiles (ie kernel launches) that dont have any triangles inside them --> implicitly done by for loop
 		for (int i = 0; i < dev_tiles[tileID].triCount; i++)
 		{
+			//dev_fragments[index].fColor = glm::vec3(1, 0, 0);
 			int triangleIndex = dev_tiles[tileID].triIndices[i];
 			glm::vec3 tri[3];
 			tri[0] = glm::vec3(dev_primitives[triangleIndex].v[0].vPos);
 			tri[1] = glm::vec3(dev_primitives[triangleIndex].v[1].vPos);
 			tri[2] = glm::vec3(dev_primitives[triangleIndex].v[2].vPos);
 
-			//edge function used below
-			//reference: https://www.scratchapixel.com/lessons/3d-basic-rendering/rasterization-practical-implementation/rasterization-stage
-			
-			float x = threadIdx.x;
-			float y = blockIdx.x;
+			int _x = (x + pixelXoffset);
+			int _y = (y+ pixelYoffset);
 
-			glm::vec2 point = glm::vec2(x,y);
-			if (IsPointInsideTriangle(tri[0], tri[1], tri[2], point))
+			glm::vec3 baryCoords = calculateBarycentricCoordinate(tri, glm::vec2(_x, _y));
+			bool isInsideTriangle = isBarycentricCoordInBounds(baryCoords);
+			if (isInsideTriangle)
 			{
-				int fragIndex = x + y*w;
-				dev_fragments[fragIndex].color = glm::vec3(0,1,0);
+				int fragIndex = index;
+				float z = getZAtCoordinate(baryCoords, tri);
+#if DEPTH_TEST
+				DepthTest(dev_primitives, dev_fragments, dev_depthBuffer, dev_mutex,
+					z, tri, baryCoords, triangleIndex, fragIndex);
+#else
+				modifyFragment(dev_primitives, dev_fragments, dev_depthBuffer, z,
+					tri, baryCoords, triangleIndex, fragIndex);
+#endif
 			}
-		}
-		//use the position of the pixel to evaluate the edge function;this avoids costly scanline
-		//edgefunction determines if that pixel position lies inside a particular triangle or not
-		//rest of the stuff is the same
+		}	
 	}
 }
 
@@ -1046,16 +1052,19 @@ __global__ void bucketPrimitivesIntoTiles(int w, int h, int stride_x, int stride
 		AABB boundingBox = getAABBForTriangle(tri);
 		
 		//if boundingbox of triangle lies inside tile add it to tile triangle list
+		int tilesX = (int)glm::ceil(double(w) / double(stride_x));
+		//int tilesY = (int)glm::ceil(double(h) / double(stride_y));
+
 		int tileidminX = glm::floor(boundingBox.min.x / stride_x);
 		int tileidmaxX = glm::ceil(boundingBox.max.x / stride_x);
 		int tileidminY = glm::floor(boundingBox.min.y / stride_y);
 		int tileidmaxY = glm::ceil(boundingBox.max.y / stride_y);
 
-		for (int i = tileidminY; i <= tileidmaxY; i++)
+		for (int i = tileidminY; i < tileidmaxY; i++)
 		{
-			for (int j = tileidminX; j <= tileidmaxX; j++)
+			for (int j = tileidminX; j < tileidmaxX; j++)
 			{
-				int tileID = j + i*(numTilesY + 1);
+				int tileID = j + i*(tilesX);
 				dev_tiles[tileID].triIndices[dev_tiles[tileID].triCount] = index;
 				dev_tiles[tileID].triCount++;
 			}
@@ -1087,33 +1096,49 @@ void rasterizeTileBased(int w, int h, int numTriangles, Tile* dev_tiles, Primiti
 
 	//preprocess step looping over all triangles to bin them into buckets corresponding to the tiles
 	dim3 blockCount1d_triangles(((numTriangles - 1) / numThreadsPerBlock.x) + 1);
-	bucketPrimitivesIntoTiles <<<blockCount1d_triangles, numThreadsPerBlock>>> (w, h, stride_x, stride_y, numTriangles,
+	bucketPrimitivesIntoTiles <<<blockCount1d_triangles, numThreadsPerBlock>>> (w, h, stride_x, stride_y, 
+																				numTriangles,
 																				dev_tiles, dev_primitives);
 	
-	int numpixels = stride_x*stride_y;
-	dim3 blockCount1d_pixels(((numpixels - 1) / numThreadsPerBlock.x) + 1);
-	for (int i = 0; i < w; i += stride_y)
+	int sideLength2d = 8;
+	dim3 blockSize2d(sideLength2d, sideLength2d);
+
+	int tilesX = glm::ceil(w / stride_x);
+	int tileXcount = 0;
+	int tileYcount = 0;
+	for (int i = 0; i < w; i+=stride_y)
 	{
-		for (int j = 0; j < h; j += stride_x)
+		for (int j = 0; j < h; j+=stride_x)
 		{		
-			//Launch as many kernels as their are tiles
-			//Discard tiles (ie kernel launches) that dont have any triangles inside them
-			int tileID = j + i*(numTilesY + 1);
-			if (dev_tiles[tileID].triCount > 0)
-			{
-				//Each kernel is launched for the pixels contatined within it
-				int tileMinX = j;
-				int tileMinY = i;
-				int tileMaxX = glm::min(j+stride_x, w-1);
-				int tileMaxY = glm::min(i+stride_y, h-1);
-				int pixelIndexMin = tileMinX*tileMinY;
-				int pixelIndexMax = tileMaxX*tileMaxY;
-				RasterizePixels <<<blockCount1d_pixels, numThreadsPerBlock>>> (numPixels, pixelIndexMin, pixelIndexMax,
-																			   tileID, dev_tiles, dev_primitives,
-																			   dev_fragments, 
-																			   dev_depthBuffer, dev_mutex);
-			}
+			//Launch as many kernels as their are tiles			
+			int tileID = tileXcount + tileYcount*(tilesX);
+			//Each kernel is launched for the pixels contatined within it
+			glm::ivec2 pixelMin = glm::ivec2(tileXcount*stride_x, tileYcount*stride_y);
+			glm::ivec2 pixelMax = glm::ivec2(glm::min((tileXcount+1)*stride_x, w-1), 
+											 glm::min((tileYcount+1)*stride_y, h-1));
+
+			int numpixelsX = pixelMax.x - pixelMin.x;
+			int numpixelsY = pixelMax.y - pixelMin.y;
+
+			int pixelXoffset = tileXcount*stride_x;
+			int pixelYoffset = tileYcount*stride_y;
+			
+			//printf("%d %d \n", pixelXoffset, pixelYoffset);
+
+			dim3 blockCount2d_tilePixels((numpixelsX - 1) / blockSize2d.x + 1,
+										 (numpixelsY - 1) / blockSize2d.y + 1);
+			RasterizePixels <<<blockCount2d_tilePixels, blockSize2d >>> (pixelXoffset, pixelYoffset,
+																				numpixelsX, numpixelsY, w,
+																				tileID, dev_tiles, 
+																				dev_primitives,
+																				dev_fragments, 
+																				dev_depthBuffer, dev_mutex);
+			checkCUDAError("tile rasterization failed");
+
+			tileXcount++;
 		}
+		tileXcount = 0;
+		tileYcount++;		
 	}
 }
 
@@ -1178,11 +1203,13 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
 	_rasterizeScanLine <<<blockSize1d, numThreadsPerBlock>>>(width, height, numActivePrimitives,
 															 dev_primitives, dev_fragmentBuffer,
 															 dev_depth, dev_mutex);
+	checkCUDAError("scanline rendering failed");
 #endif
 
 #if TILEBASED
 	rasterizeTileBased(width, height, numActivePrimitives, dev_tiles, dev_primitives, dev_fragmentBuffer,
 					   dev_depth, dev_mutex);
+	checkCUDAError("tile based rendering failed");
 #endif
 
     // Copy depthbuffer colors into framebuffer
