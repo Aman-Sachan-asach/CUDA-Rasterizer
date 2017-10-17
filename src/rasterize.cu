@@ -22,20 +22,32 @@
 static const int DEPTHSCALE = INT_MAX;
 static const int numTilesX = 16;
 static const int numTilesY = 16;
-#define TILEBASED 0 // only use tilebased or scanline not both
-#define DISPLAY_TILES 0
-#define SCANLINE 1
+static const int maxNumTiles = (numTilesX + 1)*(numTilesY + 1);
+
+// only use tilebased or scanline not both
+//Tile Based Rasterization -- only does triangular rasterization
+#define TILEBASED 1
+	#define DISPLAY_TILES 0
+
+//Scanline Rasterization
+#define SCANLINE 0
+	#define RASTERIZE_TRIANGLES 0;
+	#define RASTERIZE_LINES 1;
+	#define RASTERIZE_POINTS 0;
+
+//Shading stuff handled in the render function
 #define DISPLAY_DEPTH 0
 #define DISPLAY_NORMAL 0
 #define DISPLAY_ABSNORMAL 0
 #define FRAG_SHADING_LAMBERT 0
+
+//texture stuff
 #define TEXTURE_MAPPING 1
 #define BILINEAR_FILTERING 1
+
+//Depth Testing and Culling
 #define DEPTH_TEST 1
 #define BACKFACE_CULLING 0
-#define RASTERIZE_TRIANGLES 0;
-#define RASTERIZE_LINES 0;
-#define RASTERIZE_POINTS 1;
 
 namespace 
 {
@@ -70,11 +82,12 @@ namespace
 							 //limit to 500 triangles in a tile
 		int triCount; //how many triangles have actually filled the list
 	};
-
+	
 	struct Primitive 
 	{
 		PrimitiveType primitiveType = Triangle;	// C++ 11 init
 		VertexOut v[3];
+		bool tileBuckets[maxNumTiles];
 		bool cull;
 	};
 
@@ -130,6 +143,8 @@ static Fragment *dev_fragmentBuffer = NULL;
 static glm::vec3 *dev_framebuffer = NULL;
 
 static Tile *dev_tiles = NULL;
+static int* dev_tileTriCount = NULL;
+static int* dev_tilemutex = NULL;
 
 static int * dev_depth = NULL; //depth buffer
 static int * dev_mutex = NULL; //mutex buffer for depth
@@ -226,11 +241,18 @@ void rasterizeInit(int w, int h)
     cudaMemset(dev_framebuffer, 0, width * height * sizeof(glm::vec3));
     
 	cudaFree(dev_tiles);
-	cudaMalloc(&dev_tiles, (numTilesX + 1) * (numTilesY + 1) * sizeof(Tile));
-	cudaMemset(dev_framebuffer, 0, (numTilesX + 1) * (numTilesY + 1) * sizeof(glm::vec3));
+	cudaMalloc(&dev_tiles, maxNumTiles * sizeof(Tile));
+	cudaMemset(dev_tiles, 0, maxNumTiles * sizeof(Tile));
+
+	cudaFree(dev_tileTriCount);
+	cudaMalloc(&dev_tileTriCount, maxNumTiles * sizeof(int));
+
+	cudaFree(dev_tilemutex);
+	cudaMalloc(&dev_tilemutex, maxNumTiles * sizeof(int));
 
 	cudaFree(dev_depth);
 	cudaMalloc(&dev_depth, width * height * sizeof(int));
+
 	cudaFree(dev_mutex);
 	cudaMalloc(&dev_mutex, width * height * sizeof(int));
 	
@@ -1082,6 +1104,7 @@ __global__
 void RasterizePixels(int pixelXoffset, int pixelYoffset , int numpixelsX, int numpixelsY, 
 					 int imageWidth, int tileID, Tile* dev_tiles, 
 					 Primitive* dev_primitives, Fragment* dev_fragments, 
+					 int * dev_tileTriCount,
 					 int* dev_depthBuffer, int* dev_mutex)
 {
 	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -1092,7 +1115,8 @@ void RasterizePixels(int pixelXoffset, int pixelYoffset , int numpixelsX, int nu
 	{
 		//Each thread loops over the triangles inside the tile
 		//Discard tiles (ie kernel launches) that dont have any triangles inside them --> implicitly done by for loop
-		for (int i = 0; i < dev_tiles[tileID].triCount; i++)
+		//for (int i = 0; i < dev_tiles[tileID].triCount; i++)
+		for (int i = 0; i < dev_tileTriCount[tileID]; i++)
 		{
 			//printf("tile %d: %d \n", tileID, dev_tiles[tileID].triCount);
 #if DISPLAY_TILES
@@ -1159,6 +1183,61 @@ __global__ void bucketPrimitivesIntoTiles(int w, int stride_x, int stride_y, int
 	}
 }
 
+__global__ void bucketPrims_TileMutex(int w, int stride_x, int stride_y,
+									int numTriangles, 
+									Primitive* dev_primitives,
+									Tile* tiles,
+									int * tileTriCount, 
+									int * dev_tilemutex)
+{
+	//does the bucketing of primitives into tiles but tries to avoid race conditions by updating a list of bools that 
+	//correspond to the tiles the window is divided into. The list of bools exists per primitive.
+	//This bool list is later compiled per primitive to get the total number of primitives in a tile
+	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+	if (index < numTriangles)
+	{
+		glm::vec3 tri[3];
+		tri[0] = glm::vec3(dev_primitives[index].v[0].vPos);
+		tri[1] = glm::vec3(dev_primitives[index].v[1].vPos);
+		tri[2] = glm::vec3(dev_primitives[index].v[2].vPos);
+		AABB boundingBox = getAABBForTriangle(tri);
+
+		//if boundingbox of triangle lies inside tile add it to tile triangle list
+		int tilesX = (int)glm::ceil(double(w) / double(stride_x));
+
+		int tileidminX = glm::floor(boundingBox.min.x / stride_x);
+		int tileidmaxX = glm::ceil(boundingBox.max.x / stride_x);
+		int tileidminY = glm::floor(boundingBox.min.y / stride_y);
+		int tileidmaxY = glm::ceil(boundingBox.max.y / stride_y);
+					
+		//use mutex lock
+		for (int i = tileidminY; i < tileidmaxY; i++)
+		{
+			for (int j = tileidminX; j < tileidmaxX; j++)
+			{
+				int tileID = j + i*(tilesX);
+				bool isSet;
+				do
+				{
+					isSet = (atomicCAS(&dev_tilemutex[tileID], 0, 1) == 0);
+					if (isSet)
+					{
+						// Critical section goes here.
+						// if it is afterward, a deadlock will occur.
+						int t = tileTriCount[tileID];
+						tiles[tileID].triIndices[t] = index;
+						tileTriCount[tileID] = t + 1;
+
+						dev_tilemutex[tileID] = 0;
+					}
+				} while (!isSet);
+
+			}
+		}
+	}
+}
+
 __global__ void resetTiles(int numTiles, int stride_x, int stride_y, Tile* dev_tiles)
 {
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -1187,10 +1266,14 @@ void rasterizeTileBased(int w, int h, int numTriangles, Tile* dev_tiles, Primiti
 
 	//preprocess step looping over all triangles to bin them into buckets corresponding to the tiles
 	dim3 blockCount1d_triangles(((numTriangles - 1) / numThreadsPerBlock.x) + 1);
-	bucketPrimitivesIntoTiles <<<blockCount1d_triangles, numThreadsPerBlock>>> (w, stride_x, stride_y, 
-																				numTriangles,
-																				dev_tiles, dev_primitives);
-	
+	//bucketPrimitivesIntoTiles <<<blockCount1d_triangles, numThreadsPerBlock>>> (w, stride_x, stride_y, 
+	//																			numTriangles,
+	//																			dev_tiles, dev_primitives);
+	bucketPrims_TileMutex <<<blockCount1d_triangles, numThreadsPerBlock >>> ( w, stride_x, stride_y,
+																			numTriangles, dev_primitives,
+																			dev_tiles, dev_tileTriCount, 
+																			dev_tilemutex);
+
 	int sideLength2d = 8;
 	dim3 blockSize2d(sideLength2d, sideLength2d);
 
@@ -1222,7 +1305,8 @@ void rasterizeTileBased(int w, int h, int numTriangles, Tile* dev_tiles, Primiti
 																				numpixelsX, numpixelsY, w,
 																				tileID, dev_tiles, 
 																				dev_primitives,
-																				dev_fragments, 
+																				dev_fragments,
+																				dev_tileTriCount,
 																				dev_depthBuffer, dev_mutex);
 			checkCUDAError("tile rasterization failed");
 
@@ -1298,6 +1382,9 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
 #endif
 
 #if TILEBASED
+	cudaMemset(dev_tilemutex, 0, maxNumTiles * sizeof(int)); //mutex for tileTriCount buffer
+	cudaMemset(dev_tileTriCount, 0, maxNumTiles * sizeof(int));
+
 	rasterizeTileBased(width, height, numActivePrimitives, dev_tiles, dev_primitives, dev_fragmentBuffer,
 					   dev_depth, dev_mutex);
 	checkCUDAError("tile based rendering failed");
@@ -1327,14 +1414,18 @@ void rasterizeFree()
 			cudaFree(p->dev_diffuseTex);
 
 			cudaFree(p->dev_verticesOut);
-
-			//TODO: release other attributes and materials
 		}
 	}
 
 	////////////
 	cudaFree(dev_tiles);
 	dev_tiles = NULL;
+
+	cudaFree(dev_tileTriCount);
+	dev_tileTriCount = NULL;
+
+	cudaFree(dev_tilemutex);
+	dev_tilemutex = NULL;
 
     cudaFree(dev_primitives);
     dev_primitives = NULL;
