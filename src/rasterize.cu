@@ -18,19 +18,23 @@
 #include "rasterize.h"
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <chrono>
 
 static const int DEPTHSCALE = INT_MAX;
 static const int numTilesX = 16;
 static const int numTilesY = 16;
 static const int maxNumTiles = (numTilesX + 1)*(numTilesY + 1);
 
+//--------------------
+//Toggle-able OPTIONS
+//--------------------
 // only use tilebased or scanline not both
 //Tile Based Rasterization -- only does triangular rasterization
-#define TILEBASED 0
+#define TILEBASED 1
 	#define DISPLAY_TILES 0
 
 //Scanline Rasterization
-#define SCANLINE 1
+#define SCANLINE 0
 	#define RASTERIZE_TRIANGLES 1;
 	#define RASTERIZE_LINES 0;
 	#define RASTERIZE_POINTS 0;
@@ -148,6 +152,14 @@ static int* dev_tilemutex = NULL;
 static int * dev_depth = NULL; //depth buffer
 static int * dev_mutex = NULL; //mutex buffer for depth
 
+//------------------------------------------------
+//-------------------Timer------------------------
+using time_point_t = std::chrono::high_resolution_clock::time_point;
+time_point_t timeStartCpu;
+time_point_t timeEndCpu;
+float prevElapsedTime = 0.0f;
+//------------------------------------------------
+
 // Kernel that writes the image to the OpenGL PBO directly.
 __global__ 
 void sendImageToPBO(uchar4 *pbo, int w, int h, glm::vec3 *image) 
@@ -173,15 +185,9 @@ void sendImageToPBO(uchar4 *pbo, int w, int h, glm::vec3 *image)
 __host__ __device__ 
 glm::vec3 LambertFragShader(glm::vec3 pos, glm::vec3 color, glm::vec3 normal)
 {
-	glm::vec3 finalColor;
-	glm::vec3 lightPosition = glm::vec3(10,20,10);
-	glm::vec3 lightVec = glm::normalize(lightPosition - pos);
-	
-	glm::vec3 ambientLightColor = glm::vec3(0.2f, 0.2f, 0.2f);
-	float dot = glm::clamp(glm::abs(glm::dot(lightVec, normal)), 0.0f, 1.0f);
-	
-	finalColor = color *dot + ambientLightColor;
-	return glm::clamp(finalColor, 0.0f, 1.0f);
+	glm::vec3 lightPosition = glm::vec3(1.0f);
+	glm::vec3 finalColor = color*glm::dot(normal, glm::normalize(lightPosition - pos));
+	return finalColor;
 }
 
 //Writes fragment colors to the framebuffer
@@ -749,7 +755,7 @@ void _vertexTransformAndAssembly( int numVertices, PrimitiveDevBufPointers primi
 		vPos.x = (vPos.x + 1.0f)*float(width)*0.5f;
 		vPos.y = (1.0f - vPos.y)*float(height)*0.5f; //now in pixel space or window coordinates
 		
-		vPos.z = -(vPos.z+1.0f)*0.5f; // to convert z from a 1 to -1 range to a 0 to 1 range
+		vPos.z = (vPos.z+1.0f)*0.5f; // to convert z from a 1 to -1 range to a 0 to 1 range
 
 		glm::vec3 vNor = primitive.dev_normal[vid];
 		vNor = glm::normalize(MV_normal*vNor);
@@ -850,14 +856,17 @@ void modifyFragment(Primitive* dev_primitives, Fragment* dev_fragments,
 					glm::vec3 tri[3], glm::vec3 baryCoords,
 					int& index, int& fragIndex)
 {
-	//for perspective correct interpolation you need the z values
-	float z1 = -tri[0].z;
-	float z2 = -tri[1].z;
-	float z3 = -tri[2].z;
-
 	glm::vec3 v0eyePos = dev_primitives[index].v[0].vEyePos;
 	glm::vec3 v1eyePos = dev_primitives[index].v[1].vEyePos;
 	glm::vec3 v2eyePos = dev_primitives[index].v[2].vEyePos;
+
+	//for perspective correct interpolation you need the z values
+	float z1 = v0eyePos.z;
+	float z2 = v1eyePos.z;
+	float z3 = v2eyePos.z;
+	float perpectiveCorrectZ = 1.0f/(baryCoords.x / v0eyePos.z + 
+									 baryCoords.y / v1eyePos.z + 
+									 baryCoords.z / v2eyePos.z );
 
 	glm::vec3 v0color = dev_primitives[index].v[0].vColor;
 	glm::vec3 v1color = dev_primitives[index].v[1].vColor;
@@ -876,12 +885,12 @@ void modifyFragment(Primitive* dev_primitives, Fragment* dev_fragments,
 	//if testing Depth coloration
 	dev_fragments[fragIndex].dev_diffuseTex = triangleDiffuseTex;
 	dev_fragments[fragIndex].depth = dev_depthBuffer[fragIndex]/float(DEPTHSCALE);
-	dev_fragments[fragIndex].fNor = z*((v0Nor / z1)*baryCoords.x + 
-									   (v1Nor / z2)*baryCoords.y + 
-									   (v2Nor / z3)*baryCoords.z );
-	dev_fragments[fragIndex].texcoord0 = z*((v0UV / z1)*baryCoords.x +
-										    (v0UV / z2)*baryCoords.y +
-										    (v0UV / z3)*baryCoords.z);
+	dev_fragments[fragIndex].fNor = perpectiveCorrectZ*((v0Nor / z1)*baryCoords.x +
+														(v1Nor / z2)*baryCoords.y + 
+														(v2Nor / z3)*baryCoords.z );
+	dev_fragments[fragIndex].texcoord0 = perpectiveCorrectZ*((v0UV / z1)*baryCoords.x +
+															 (v0UV / z2)*baryCoords.y +
+															 (v0UV / z3)*baryCoords.z);
 
 	if (TEXTURE_MAPPING && dev_fragments[fragIndex].dev_diffuseTex != NULL)
 	{
@@ -1011,10 +1020,10 @@ void _rasterizeTriangles(int w, int h, int index, glm::vec3 *tri,
 	AABB boundingBox = getAABBForTriangle(tri);
 
 	//clamp BB to be within the window
-	int BBminX = glm::min(w, glm::max(0, int(boundingBox.min.x)));
-	int BBmaxX = glm::max(0, glm::min(w, int(boundingBox.max.x)));
-	int BBminY = glm::min(h, glm::max(0, int(boundingBox.min.y)));
-	int BBmaxY = glm::max(0, glm::min(h, int(boundingBox.max.y)));
+	int BBminX = glm::min(w-1, glm::max(0, int(boundingBox.min.x)));
+	int BBmaxX = glm::max(0, glm::min(w-1, int(boundingBox.max.x)));
+	int BBminY = glm::min(h-1, glm::max(0, int(boundingBox.min.y)));
+	int BBmaxY = glm::max(0, glm::min(h-1, int(boundingBox.max.y)));
 
 	for (int y = BBminY; y <= BBmaxY; ++y)
 	{
@@ -1025,7 +1034,7 @@ void _rasterizeTriangles(int w, int h, int index, glm::vec3 *tri,
 			if (isInsideTriangle)
 			{
 				int fragIndex = x + y*w;
-				float z = getZAtCoordinate(baryCoords, tri);
+				float z = -getZAtCoordinate(baryCoords, tri);
 #if DEPTH_TEST
 				DepthTest(dev_primitives, dev_fragments, dev_depthBuffer, dev_mutex,
 					z, tri, baryCoords, index, fragIndex);
@@ -1123,10 +1132,8 @@ void RasterizePixels(int pixelXoffset, int pixelYoffset , int numpixelsX, int nu
 	{
 		//Each thread loops over the triangles inside the tile
 		//Discard tiles (ie kernel launches) that dont have any triangles inside them --> implicitly done by for loop
-		//for (int i = 0; i < dev_tiles[tileID].triCount; i++)
 		for (int i = 0; i < dev_tileTriCount[tileID]; i++)
 		{
-			//printf("tile %d: %d \n", tileID, dev_tiles[tileID].triCount);
 #if DISPLAY_TILES
 			dev_fragments[index].fColor = glm::vec3(1, 0, 0);
 			return;
@@ -1145,7 +1152,7 @@ void RasterizePixels(int pixelXoffset, int pixelYoffset , int numpixelsX, int nu
 			if (isInsideTriangle)
 			{
 				int fragIndex = index;
-				float z = getZAtCoordinate(baryCoords, tri);
+				float z = -getZAtCoordinate(baryCoords, tri);
 #if DEPTH_TEST
 				DepthTest(dev_primitives, dev_fragments, dev_depthBuffer, dev_mutex,
 					z, tri, baryCoords, triangleIndex, fragIndex);
@@ -1297,6 +1304,11 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
     dim3 blockCount2d((width  - 1) / blockSize2d.x + 1,
 					  (height - 1) / blockSize2d.y + 1);
 
+	//------------------------------------------------
+	//Timer Start
+	timeStartCpu = std::chrono::high_resolution_clock::now();
+	//------------------------------------------------
+
 	//----------------------------------------------------------
 	//----------------- Rasterization pipeline------------------
 	//----------------------------------------------------------
@@ -1366,6 +1378,15 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
     // Copy depthbuffer colors into framebuffer
 	render <<<blockCount2d, blockSize2d >>>(width, height, dev_fragmentBuffer, dev_framebuffer);
 	checkCUDAError("fragment shader");
+
+	//------------------------------------------------
+	//Timer End
+	timeEndCpu = std::chrono::high_resolution_clock::now();
+	std::chrono::duration<double, std::milli> duration = timeEndCpu - timeStartCpu;
+	prevElapsedTime = static_cast<decltype(prevElapsedTime)>(duration.count());
+	printf("%f\n", prevElapsedTime);
+	//------------------------------------------------
+
     // Copy framebuffer into OpenGL buffer for OpenGL previewing
     sendImageToPBO<<<blockCount2d, blockSize2d>>>(pbo, width, height, dev_framebuffer);
     checkCUDAError("copy render result to pbo");
