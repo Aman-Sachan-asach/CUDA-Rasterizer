@@ -45,7 +45,7 @@ If however, all the triangles exist inside a few tiles the technique is pretty u
 ScanLine Rasterization is the most common rasterization technique. Scanline literally scans pixels row-wise to create a picture. This can be optimized by the use of Bounding boxes for each primitive and then only performing scanline inside the primitive. Other basic optimizations include using the line intersection testing to determine the start and end points of every row being evaluated (a triangle cant occupy the entirety of its bounding box, usually a triangle fills close to half of its bounding box). In my scanline implementation, a kernel parallelized over the number of primitives is launched, and then scanline is performed over the bounding box of each primitive.
 
 ![](readmeImages/BasicPipelineFeatureComparison.png)
-scanlineStages_rasterizationAndShading.png
+
 ![](readmeImages/scanlineStages_rasterizationAndShading.png)
 
 Performance of scanline rasterization is pretty good although it usually cannot compete with tile based rendering. My implementation of scanline rasterization was used as a baseline to compare every feature against. However, it is about half as fast as tile based rasterization.
