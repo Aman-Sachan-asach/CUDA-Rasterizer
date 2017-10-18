@@ -33,9 +33,11 @@ Tile Based Rasterization is a technique that is commonly seen on low-power devic
 
 Tiled rasterization simply cuts up the output image into a grid of 2D tiles that are then dealt with separately. As a preprocess step all the primitives in the scene are binned into different tiles using their bounding boxes. Then, during the actual rasterization stage a separate kernel is launched for each tile that deals with only those primitives that happened to be binned into that tile. And those are pretty much the only major differences that tiled rasterization introduces as compared to a regular scanline implementaion.
 
+![](readmeImages/tileOccupancy.png)
+
 ![](readmeImages/TileBased_vs_ScanLine.png)
 
-Performance wise there is a 3X increase in the framerate when the window space triangles are distributed over most of the tiles. This is mostly because tile based is more stable in terms of performance whereas there is an exponential drop for regular scanline rasterization.
+Performance wise there is an almost 4X increase in the framerate when the window space triangles are distributed over most of the tiles. This is mostly because tile based is more stable in terms of performance whereas there is an exponential drop for regular scanline rasterization.
 If however, all the triangles exist inside a few tiles the technique is pretty useless. Fortunately, in real world applications triangles are pretty evenly distributed and binning them into tiles greatly increases the framerate. Performance for tile based rasterization can be simplified to the time complexity of the numberOfPixels x (numberOfPrimitives/numTiles) assuming we have a uniform distribution of triangles in window space.
 
 ### ScanLine Rasterization
@@ -63,6 +65,8 @@ Bilinear filtering is a texture filtering method used to smooth textures when di
 
 A depth test is used to ensure that only the fragments that can be seen by the camera are drawn (assuming there isnt transparency). In practice, this means if there are a thousand triangles in a line behind the camera then only the fragment from the first camera will be drawn or written into. In a GPU rasterizer, the depth test has to be performed atomically or with mutexes. This is because in a parallelised kernel, multiple threads can try and write to the fragment buffer at the same time at the same location. This is a "race condition." There is no guarantee as to which thread will finish writing to it last. To avoid this, I used a mutex that basically acts as a lock. A mutex array contatains a lock for every index of the fragment buffer. Atomics are operations that guarantee serial operation amongst parallel threads. Atomics however dont prevent race conditions between different blocks launched by a kernel. Thus they can produce rare race conditions that show up as a few blinking pixels.
 
+![](readmeImages/depthTest.png)
+
 Performance wise Depth Testing leads to a big hit in the framerate because we have serialized what was once a parallel section of our code.
 
 ### Backface Culling
@@ -77,9 +81,13 @@ Just like OpenGL, my implementation of a rasterizer allows for drawing meshes as
 
 #### Wireframe (Lines)
 
+![](readmeImages/WireframeRasterization.png)
+
 Equivalent to GL_LINES.
 
 #### Point Cloud (Points)
+
+![](readmeImages/PointRasterization.png)
 
 Equivalent to GL_POINTS.
 
@@ -88,10 +96,16 @@ Equivalent to GL_POINTS.
 Shading models are what sell the illusion that is rasterization. Great shading models can turn a scene into a believable landscape. I have implemented the standard lambertian shading model along with debug shading models.
 
 #### Lambertian
+
+![](readmeImages/Engine.png)
+
 #### Depth Shading
-#### Diffuse Color
+
+![](readmeImages/depthTest.png)
+
 #### Normals
-#### Absolute Normals
+
+![](readmeImages/NormalsCow.png)
 
 ### Credits
 
