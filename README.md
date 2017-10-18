@@ -63,7 +63,9 @@ Transforming positions from View space to NDC space involves perspective divisio
 
 ### Bilinear Filtering
 
- ![](readmeImages/grid_interpolation2d.png)
+ ![](readmeImages/inputbilinear.png)  |  ![](readmeImages/bilinear.png) |
+|---|---|
+|  random colors  |  bilinear filtering applied |
 
 Bilinear filtering is a texture filtering method used to smooth textures when displayed larger or smaller than they actually are, which is almost all the time. Bilinear filtering essentially bilinearly interpolates between the 4 pixels surrounding the look up point. It makes images look much much better and not pixelated. However, it does introduces slight artifacts that can be removed with better but more expensive filtering methods such as trilinear filtering.
 
