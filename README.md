@@ -55,9 +55,15 @@ Texture Mapping is a technique that maps a 2D image onto a 3D object; it is also
 
 ### Perspective Correct Interpolation of values
 
+ ![](readmeImages/notPerspectiveCorrect.png)  |  ![](readmeImages/perspectiveCorrect.png) |
+|---|---|
+|  no perspective correct  |  perspective correct |
+
 Transforming positions from View space to NDC space involves perspective division. This can introduce artifacts in textures if it isnt taken into account during color interpolation for fragments. Perspective Correct Interpolation doesn't add much if anything to the computational cost of barycentric interpolation.
 
 ### Bilinear Filtering
+
+ ![](readmeImages/grid_interpolation2d.png)
 
 Bilinear filtering is a texture filtering method used to smooth textures when displayed larger or smaller than they actually are, which is almost all the time. Bilinear filtering essentially bilinearly interpolates between the 4 pixels surrounding the look up point. It makes images look much much better and not pixelated. However, it does introduces slight artifacts that can be removed with better but more expensive filtering methods such as trilinear filtering.
 
