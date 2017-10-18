@@ -35,8 +35,8 @@ static const int maxNumTiles = (numTilesX + 1)*(numTilesY + 1);
 
 //Scanline Rasterization
 #define SCANLINE 1
-	#define RASTERIZE_TRIANGLES 1;
-	#define RASTERIZE_LINES 0;
+	#define RASTERIZE_TRIANGLES 0;
+	#define RASTERIZE_LINES 1;
 	#define RASTERIZE_POINTS 0;
 
 //Shading stuff handled in the render function
@@ -47,7 +47,7 @@ static const int maxNumTiles = (numTilesX + 1)*(numTilesY + 1);
 
 //texture stuff
 #define TEXTURE_MAPPING 1
-#define BILINEAR_FILTERING 0
+#define BILINEAR_FILTERING 1
 
 //Depth Testing and Culling
 #define DEPTH_TEST 1

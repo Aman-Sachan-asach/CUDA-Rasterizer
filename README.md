@@ -87,6 +87,8 @@ In a 3D scene there are objects that will not be seen by camera because they are
 
 Just like OpenGL, my implementation of a rasterizer allows for drawing meshes as lines and also as point clouds.
 
+![](readmeImages/RasterizationByPrimitives.png)
+
 #### Wireframe (Lines)
 
 ![](readmeImages/WireframeRasterization.png)
