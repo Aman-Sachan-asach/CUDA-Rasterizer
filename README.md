@@ -6,6 +6,8 @@ CUDA Rasterizer
 * Aman Sachan
 * Tested on: Windows 10, i7-7700HQ @ 2.8GHz 32GB, GTX 1070(laptop GPU) 8074MB (Personal Machine: Customized MSI GT62VR 7RE)
 
+[![](readmeImages/CUDARasterizerVimeoLink.png)](https://vimeo.com/236271250)
+
 ## Overview
 
 Rasterization (or rasterisation) as defined by wikipedia is the task of taking an image described in a vector graphics format (shapes) and converting it into a raster image (pixels or dots).
@@ -21,7 +23,7 @@ The pipeline I implemented here is a fairly simple one. It consists of:
 	- Per fragment depth test
 	- Fragment shading
 
-![](images/duck.gif)
+![](readmeImages/pipeline.png)
 
 ## Features
 
@@ -31,11 +33,16 @@ Tile Based Rasterization is a technique that is commonly seen on low-power devic
 
 Tiled rasterization simply cuts up the output image into a grid of 2D tiles that are then dealt with separately. As a preprocess step all the primitives in the scene are binned into different tiles using their bounding boxes. Then, during the actual rasterization stage a separate kernel is launched for each tile that deals with only those primitives that happened to be binned into that tile. And those are pretty much the only major differences that tiled rasterization introduces as compared to a regular scanline implementaion.
 
-Performance wise there is a 2X or more increase in the framerate when the window space triangles are distributed over most of the tiles. If however, all the triangles exist inside a few tiles the technique is pretty useless. Fortunately, in real world applications triangles are pretty evenly distributed and binning them into tiles greatly increases the framerate. Performance for tile based rasterization can be simplified to the time complexity of the numberOfPixels x (numberOfPrimitives/numTiles) assuming we have a uniform distribution of triangles in window space.
+![](readmeImages/TileBased_vs_ScanLine.png)
+
+Performance wise there is a 3X increase in the framerate when the window space triangles are distributed over most of the tiles. This is mostly because tile based is more stable in terms of performance whereas there is an exponential drop for regular scanline rasterization.
+If however, all the triangles exist inside a few tiles the technique is pretty useless. Fortunately, in real world applications triangles are pretty evenly distributed and binning them into tiles greatly increases the framerate. Performance for tile based rasterization can be simplified to the time complexity of the numberOfPixels x (numberOfPrimitives/numTiles) assuming we have a uniform distribution of triangles in window space.
 
 ### ScanLine Rasterization
 
 ScanLine Rasterization is the most common rasterization technique. Scanline literally scans pixels row-wise to create a picture. This can be optimized by the use of Bounding boxes for each primitive and then only performing scanline inside the primitive. Other basic optimizations include using the line intersection testing to determine the start and end points of every row being evaluated (a triangle cant occupy the entirety of its bounding box, usually a triangle fills close to half of its bounding box). In my scanline implementation, a kernel parallelized over the number of primitives is launched, and then scanline is performed over the bounding box of each primitive.
+
+![](readmeImages/BasicPipelineFeatureComparison.png)
 
 Performance of scanline rasterization is pretty good although it usually cannot compete with tile based rendering. My implementation of scanline rasterization was used as a baseline to compare every feature against. However, it is about half as fast as tile based rasterization.
 Performance for scanline rasterization can be simplified to the time complexity of the numberOfPixels x numberOfPrimitives assuming we have a uniform distribution of triangles in window space.
@@ -61,6 +68,8 @@ Performance wise Depth Testing leads to a big hit in the framerate because we ha
 ### Backface Culling
 
 In a 3D scene there are objects that will not be seen by camera because they aren't facing the camera. It is a good idea to simply ignore these triangles as they dont generally add to the final image.
+
+![](readmeImages/PipelineComparison__Breakdown.png)
 
 ### Different Primitive Types
 

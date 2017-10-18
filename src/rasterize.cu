@@ -30,11 +30,11 @@ static const int maxNumTiles = (numTilesX + 1)*(numTilesY + 1);
 //--------------------
 // only use tilebased or scanline not both
 //Tile Based Rasterization -- only does triangular rasterization
-#define TILEBASED 1
+#define TILEBASED 0
 	#define DISPLAY_TILES 0
 
 //Scanline Rasterization
-#define SCANLINE 0
+#define SCANLINE 1
 	#define RASTERIZE_TRIANGLES 1;
 	#define RASTERIZE_LINES 0;
 	#define RASTERIZE_POINTS 0;
@@ -51,7 +51,7 @@ static const int maxNumTiles = (numTilesX + 1)*(numTilesY + 1);
 
 //Depth Testing and Culling
 #define DEPTH_TEST 1
-#define BACKFACE_CULLING 1
+#define BACKFACE_CULLING 0
 
 namespace 
 {
@@ -909,9 +909,9 @@ void modifyFragment(Primitive* dev_primitives, Fragment* dev_fragments,
 	}
 	else
 	{
-		dev_fragments[fragIndex].fColor = z*((v0color / z1)*baryCoords.x +
-											 (v1color / z2)*baryCoords.y +
-											 (v2color / z3)*baryCoords.z);
+		dev_fragments[fragIndex].fColor = perpectiveCorrectZ*((v0color / z1)*baryCoords.x +
+															  (v1color / z2)*baryCoords.y +
+															  (v2color / z3)*baryCoords.z);
 	}
 
 	//to make the normals follow convention:
@@ -1303,16 +1303,17 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
     dim3 blockSize2d(sideLength2d, sideLength2d);
     dim3 blockCount2d((width  - 1) / blockSize2d.x + 1,
 					  (height - 1) / blockSize2d.y + 1);
-
+	
 	//------------------------------------------------
 	//Timer Start
-	timeStartCpu = std::chrono::high_resolution_clock::now();
+	//timeStartCpu = std::chrono::high_resolution_clock::now();
 	//------------------------------------------------
 
 	//----------------------------------------------------------
 	//----------------- Rasterization pipeline------------------
 	//----------------------------------------------------------
 	// Vertex Process & primitive assembly
+
 	{
 		curPrimitiveBeginId = 0;
 		dim3 numThreadsPerBlock(128);
@@ -1358,7 +1359,7 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
 	
 	dim3 numThreadsPerBlock(128);
 #if SCANLINE
-	// rasterize --> looping over all primitives(triangles)	
+	// rasterize --> looping over all primitives(triangles)
 	dim3 blockSize1d((numActivePrimitives - 1) / numThreadsPerBlock.x + 1);
 	_rasterizeScanLine <<<blockSize1d, numThreadsPerBlock>>>(width, height, numActivePrimitives,
 															 dev_primitives, dev_fragmentBuffer,
@@ -1381,10 +1382,10 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
 
 	//------------------------------------------------
 	//Timer End
-	timeEndCpu = std::chrono::high_resolution_clock::now();
-	std::chrono::duration<double, std::milli> duration = timeEndCpu - timeStartCpu;
-	prevElapsedTime = static_cast<decltype(prevElapsedTime)>(duration.count());
-	printf("%f\n", prevElapsedTime);
+	//timeEndCpu = std::chrono::high_resolution_clock::now();
+	//std::chrono::duration<double, std::milli> duration = timeEndCpu - timeStartCpu;
+	//prevElapsedTime = static_cast<decltype(prevElapsedTime)>(duration.count());
+	//printf("%f\n", prevElapsedTime);
 	//------------------------------------------------
 
     // Copy framebuffer into OpenGL buffer for OpenGL previewing
