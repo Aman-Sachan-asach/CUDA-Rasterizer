@@ -6,7 +6,7 @@ CUDA Rasterizer
 * Aman Sachan
 * Tested on: Windows 10, i7-7700HQ @ 2.8GHz 32GB, GTX 1070(laptop GPU) 8074MB (Personal Machine: Customized MSI GT62VR 7RE)
 
-[![](readmeImages/CUDARasterizerVimeoLink.png)](https://vimeo.com/236271250)
+[![](readmeImages/CUDARasterizerVimeoLink.png)](https://vimeo.com/238849486)
 
 ## Overview
 

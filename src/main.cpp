@@ -105,7 +105,7 @@ void mainLoop()
 //---------RUNTIME STUFF---------
 //-------------------------------
 float scale = 1.0f;
-float x_trans = 0.0f, y_trans = 0.0f, z_trans = -10.0f;
+float x_trans = 0.0f, y_trans = 0.0f, z_trans = -30.0f;
 float x_angle = 0.0f, y_angle = 0.0f;
 void runCuda() 
 {

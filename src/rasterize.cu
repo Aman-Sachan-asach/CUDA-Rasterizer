@@ -21,8 +21,8 @@
 #include <chrono>
 
 static const int DEPTHSCALE = INT_MAX;
-static const int numTilesX = 16;
-static const int numTilesY = 16;
+static const int numTilesX = 32;
+static const int numTilesY = 32;
 static const int maxNumTiles = (numTilesX + 1)*(numTilesY + 1);
 
 //--------------------
@@ -47,7 +47,7 @@ static const int maxNumTiles = (numTilesX + 1)*(numTilesY + 1);
 
 //texture stuff
 #define TEXTURE_MAPPING 1
-#define BILINEAR_FILTERING 1
+#define BILINEAR_FILTERING 0
 
 //Depth Testing and Culling
 #define DEPTH_TEST 1
