@@ -46,7 +46,13 @@ ScanLine Rasterization is the most common rasterization technique. Scanline lite
 
 ![](readmeImages/BasicPipelineFeatureComparison.png)
 
+Vertex Shading and Primitive Assembly are taking a lot of time. This might be because of the huge indirection and memory reassignment that is happening in global memory. You are taking a huge chunk of global memory and assigning it to some other giant chunk of global memory. This is not friendly data flow and could possibly be made better if the memory chunks were closer together and more coherent somehow.
+
+Anyway, because Vertex shading and primitive assembly are common to all the features, we can ignore them and just look at the rasterization and shading stages.
+
 ![](readmeImages/scanlineStages_rasterizationAndShading.png)
+
+Usually Shading is incredibly expensive but because the most complex shader in use is a lambertian shader, which is simply a dot product, 2 normalizations, a multiplication, and an addition it is not complex at all. This is why the shading stage is about as expensive as the rasterization stage.
 
 Performance of scanline rasterization is pretty good although it usually cannot compete with tile based rendering. My implementation of scanline rasterization was used as a baseline to compare every feature against. However, it is about half as fast as tile based rasterization.
 Performance for scanline rasterization can be simplified to the time complexity of the numberOfPixels x numberOfPrimitives assuming we have a uniform distribution of triangles in window space.
